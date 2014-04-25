@@ -63,15 +63,9 @@ Level-0 files are written all in once shot (using fs.writeFile()).
 * +writing_level0_block+: whether a +fs.writeFile()+ call is pending.
 * +pending_writing_level0_files+:  a queue of Level-0 files to write out.
 
-Members for Pending Queue of Add Requests
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-* oldest_request = null;
-* newest_request = null;
-
 Members for the List of Files
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-* oldest_file = null;
-* newest_file = null;
+* +oldest_file+, +newest_file+: start/end of a list of files linked via +older+/+newer+.
 
 Members for ID Allocation
 ^^^^^^^^^^^^^^^^^^^^^^^^^
