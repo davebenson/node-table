@@ -1,0 +1,106 @@
+Distributed Database
+--------------------
+Our goal is to implememt a efficient distributed data store.
+
+Public Methods
+~~~~~~~~~~~~~~
+
+   update(doc, callback)
+
+...
+
+   get(doc_id, callback)
+
+...
+
+   delete(doc_id, callback)
+
+...
+
+
+JsonLookupTableSimple
+---------------------
+This is a simple, but efficient, store for JSON documents.
+
+Public Methods
+~~~~~~~~~~~~~~
+
+   add(doc, callback)
+
+Adds a document to the table, with merging.  By the time the callback is invoked, the data is committed.  (If the process crashes before the callback is invoked, then
+the data may or may not be committed.)
+
+
+Implementation Overview
+~~~~~~~~~~~~~~~~~~~~~~~
+Data is first written to a journal and a in-memory ``tree''.  Once these get large enough, the data is flushed to a sorted, merged file.
+
+
+Object Type: JsonLookupTableSimple
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+There are three rough parts to this object:
+
+* the journal / in-memory store
+* the array of files
+* the MergeJobs which combine cronologically adjacent files
+
+Members for the Journal
+^^^^^^^^^^^^^^^^^^^^^^^
+* +journal+: a write-only stream
+* +journal_write_pending+: boolean telling whether a write() call is awaiting callback.
+* +journal_write_pending_buffers+: if journal_write_pending, this stores buffers that will be concatenated onto stream once current write finishes
+* +journal_write_pending_callbacks+: callbacks for this above buffers.
+* +journal_max_entries+: when the journal gets this big, flush the "level0" file to disk, possibly triggering a change of merges
+
+Members for the In-Memory "Tree"
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+* +sort_merged+: array of +null+ and arrays of JSON objects
+
+Members for Writing Level-0 Sorted/Merged Files
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Level-0 files are written all in once shot (using fs.writeFile()).
+
+* +writing_level0_block+: whether a +fs.writeFile()+ call is pending.
+* +pending_writing_level0_files+:  a queue of Level-0 files to write out.
+
+Members for Pending Queue of Add Requests
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+* oldest_request = null;
+* newest_request = null;
+
+Members for the List of Files
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+* oldest_file = null;
+* newest_file = null;
+
+Members for ID Allocation
+^^^^^^^^^^^^^^^^^^^^^^^^^
+* next_file_id = 1;
+
+Members for Configuration
+^^^^^^^^^^^^^^^^^^^^^^^^^
+* compare = options.compare;
+* merge = options.merge;
+
+Object Type: JsonLookupTableSimple_File
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* +start_input_entry+: the first element in the global sense of things added to this database.
+* +n_input_entries+: the number of inputted entries corresponding to this file
+* +size_bytes+: this file's size in bytes
+* +size_entries+: this file's size in sorted/merged entries
+* +newer+
+* +older+
+* +merge_job+
+* +start_input_entry_time+: seconds since unix-epoch, of earliest input entry
+* +end_input_entry_time+
+
+Object Type: JsonLookupTableSimple_MergeJob
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+todo
+
+Private Methods
+~~~~~~~~~~~~~~~
+todo
+
+
+
