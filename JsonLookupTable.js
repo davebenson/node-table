@@ -10,6 +10,7 @@
 var fs = require("fs");
 var fs_ext = require("fs-ext");
 var assert = require("assert");
+var util = require("util");
 
 exports.create_database = function(options, database_callback) {
   var c = options.class ? options.class : module.exports.DocDatabaseSimple;
@@ -457,7 +458,7 @@ exports.JsonLookupTableSimple.prototype._allocate_file_id = function()
 exports.JsonLookupTableSimple.prototype._array_lookup = function(curried_comparator, array)
 {
   var start = 0, n = array.length;
-  while (n > 1) {
+  while (n > 0) {
     var mid = start + Math.floor(n / 2);
     var rv = curried_comparator(array[mid]);
     if (rv < 0)
