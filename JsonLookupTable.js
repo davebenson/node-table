@@ -17,24 +17,52 @@ exports.create_database = function(options, database_callback) {
   return new c(options);
 }
 
-var DEFAULT_JOURNAL_MAX_ENTRIES_LOG2 = 9;
+var DEFAULT_JOURNAL_MAX_ENTRIES = 512;
 
 /// uh what's the right idiom here?
 var exports = module.exports;
 
 var newline_buffer = new Buffer("\n");
 
+function _JsonLookupTableSimple_MergeInput() {
+  this.input_offset = 0;
+  this.input_file = null;
+  this.input_pending = false;
+  this.input_buffer = new Buffer();
+  this.input_peeked_json = null;
+  this.input_peeked_json_size = 0;
+}
+_JsonLookupTableSimple_MergeInput.prototype.toJSON = function() {
+  return {
+    input_id: this.input_file.id,
+    input_offset: this.input_offset
+  }
+};
+_JsonLookupTableSimple_MergeInput.prototype.remove_first = function(n)
+{
+  for (var i = 0; i < n; i++)
+    this.input_offset += this.pending[i][1];
+  this.pending.splice(0, n);
+  if (this.length === 0
+   && this.input_offset >= this.file.size_bytes)
+    this.eof = true;
+};
 function _JsonLookupTableSimple_MergeJob() {
-  this.newer_input_offset = 0;
-  this.newer_input_file = null;
+  this.newer = new _JsonLookupTableSimple_MergeInput();
+  this.older = new _JsonLookupTableSimple_MergeInput();
 
-  this.older_input_offset = 0;
-  this.older_input_file = null;
-
-  this.output_id = 0;
-  this.output_fd = -1;
+  this.output_file = new _JsonLookupTableSimple_File();
   this.output_offset = 0;
 }
+_JsonLookupTableSimple_MergeJob.prototype.toJSON = function() {
+  return {
+    output_id: this.output_file.id,
+    output_offset: this.output_offset,
+    output_n_entries: this.output_file.size_entries,
+    older: this.older.toJSON(),
+    newer: this.newer.toJSON(),
+  };
+};
 
 function _JsonLookupTableSimple_File() {
   this.fd = -1;
@@ -46,7 +74,17 @@ function _JsonLookupTableSimple_File() {
   this.newer = null;
   this.older = null;
   this.merge_job = null;
+  this.ref_count = 1;
 }
+_JsonLookupTableSimple_File.prototype.toJSON = function() {
+  return {
+    id: this.id,
+    start_input_entry: this.start_input_entry,
+    n_input_entries: this.n_input_entries,
+    size_bytes: this.size_bytes,
+    size_entries: this.size_entries,
+  };
+};
 
 function _JsonLookupTableSimple_SortMergeInMemory(compare, merge) {
   this.lol = [];
@@ -89,21 +127,72 @@ function(older, newer) {
   return rv;
 };
 
+_JsonLookupTableSimple_SortMergeInMemory.prototype.reset = function()
+{
+  this.lol = [];
+};
+_JsonLookupTableSimple_SortMergeInMemory.prototype.get_list = function()
+{
+  var rv = null;
+  for (var i = 0; i < lol.length; i++)
+    if (lol[i] !== null) {
+      if (rv === null)
+        rv = lol[i];
+      else
+        rv = this._merge_lists(lol[i], rv);
+    }
+  return rv ? rv : [];
+};
+_JsonLookupTableSimple_SortMergeInMemory.prototype.get = function(curried_comparator)
+{
+  var rv = null;
+  for (var i = 0; i < this.lol.length; i++) {
+    if (this.lol[i]) {
+      var sub_rv = this._array_lookup(curried_comparator, this.lol[i]);
+      if (sub_rv) {
+        if (rv === null)
+	  rv = sub_rv;
+        else
+          rv = this.merge(sub_rv, rv); 
+      }
+    }
+  }
+  return rv;
+};
+_JsonLookupTableSimple_SortMergeInMemory.prototype._array_lookup = function(curried_comparator, array)
+{
+  var start = 0, n = array.length;
+  while (n > 0) {
+    var mid = start + Math.floor(n / 2);
+    var rv = curried_comparator(array[mid]);
+    if (rv < 0)
+      n = mid - start;
+    else if (rv > 0) {
+      var end = start + n;
+      start = mid + 1;
+      n = end - start;
+    } else
+      return array[mid];
+  }
+  return null;
+};
+
 exports.JsonLookupTableSimple = function(options) {
   this.n_latest = 0;
   this.sort_merged = [];
   this.dir = options.dir;
   assert.equal(typeof(this.dir), 'string');
+  this.n_input_entries = 0;
   this.journal_write_pending = false;
   this.journal_write_pending_buffers = [];
   this.journal_write_pending_callbacks = [];
-  this.journal_max_entries_log2 = options.journal_max_entries_log2 || DEFAULT_JOURNAL_MAX_ENTRIES_LOG2;
-  for (var i = 0; i < this.journal_max_entries_log2; i++)
-    this.sort_merged.push(null);
-  this.writing_level0_block = false;
-  this.pending_writing_level0_files = [];
+  this.journal_start_input_entry = 0;
+  this.journal_max_entries = options.journal_max_entries || DEFAULT_JOURNAL_MAX_ENTRIES;
+  //this.writing_level0_block = false;
+  //this.pending_writing_level0_files = [];
   this.compare = options.compare;
   this.merge = options.merge;
+  this.sort_merger = new _JsonLookupTableSimple_SortMergeInMemory(options.compare, options.merge);
   this.next_file_id = 1;
   this.oldest_file = null;
   this.newest_file = null;
@@ -123,9 +212,14 @@ exports.JsonLookupTableSimple = function(options) {
   fs_ext.flockSync(this.dir_fd, "exnb");
 
   var cp_json;
+  var journal_lines = [];
   try {
-    var cp_data = fs.readFileSync(this.dir + "/CHECKPOINT");
-    cp_json = JSON.parse(cp_data.toString());
+    var cp_data = fs.readFileSync(this.dir + "/JOURNAL");
+    assert(cp_data[cp_data.length - 1] === 0x0a);
+    var lines = cp_data.slice(0,cp_data.length - 1).toString().split("\n");
+    cp_json = JSON.parse(lines[0]);
+    for (var i = 1; i < lines.length; i++)
+      journal_lines.push(JSON.parse(lines[i]));
   } catch (e) {
     if (e.code !== 'ENOENT') {
       throw(e);
@@ -134,30 +228,22 @@ exports.JsonLookupTableSimple = function(options) {
     // check that there's no data-like stuff
     var files = fs.readdirSync(this.dir);
     for (var fi = 0; fi < files.length; fi++) {
-      throw(new Error("directory contained " + files[fi] + " (out of " + files.length + " files), but no CHECKPOINT"));
+      throw(new Error("directory contained " + files[fi] + " (out of " + files.length + " files), but no JOURNAL"));
     }
 
     // Create empty checkpoint.
-    cp_json = {pending_level0s: [],
-               files: [],
+    cp_json = {files: [],
                merge_jobs: [],
                next_file_id: 1};
-    var cp_data = new Buffer(JSON.stringify(cp_json));
-    fs.writeFileSync(this.dir + "/CHECKPOINT", cp_data);
-    fs.writeFileSync(this.dir + "/JOURNAL", new Buffer(0));
+    var cp_data = new Buffer(JSON.stringify(cp_json) + "\n");
+    fs.writeFileSync(this.dir + "/JOURNAL", cp_data);
   }
 
   // Open all files and merge jobs, restart any journalling -> level_0 writes.
 
-  // open JOURNAL
-  var journal_data = fs.readFileSync(this.dir + "/JOURNAL");
-  for (var last_nl_pos = journal_data.length - 1; last_nl_pos >= 0; last_nl_pos--)
-    if (journal_data[last_nl_pos] === 0x0a)
-      break;
-  var clipped_journal_len = last_nl_pos + 1;
-  if (clipped_journal_len < journal_data.length) {
-    fs.truncateSync(this.dir + "/JOURNAL", clipped_journal_len);
-  }
+  this.next_file_id = cp_json.next_file_id;
+  this.journal_start_input_entry = cp_json.n_input_entries;
+  this.n_input_entries = cp_json.n_input_entries;
 
   // open files; create files list
   var last_f = null;
@@ -180,101 +266,73 @@ exports.JsonLookupTableSimple = function(options) {
     f.fd = fs.openSync(this.dir + "/F." + f.id, "r");
   }
 
-  // open JOURNAL.### and writeFileSync(), add to files list
-  last_f = this.newest_file;
-  for (var i = 0; i < cp_json.pending_level0s.length; i++) {
-    var file_id = cp_json.pending_level0s[i].id;
-    var journal_file_data = fs.readFileSync(this.dir + "/JOURNAL." + file_id);
-    assert(journal_file_data[journal_file_data.length - 1] === 0x0a);
-    var journal_file_lines = journal_file_data.slice(0,journal_file_data.length - 1).split("\n");
-    var sm = new _JsonLookupTableSimple_SortMergeInMemory(this.compare, this.merge);
-    for (var j = 0; j < journal_file_lines.length; j++) {
-      sm.add(JSON.parse(journal_file_lines[j]));
-    }
-    var entries = sm.finish();
-    var buffers = [];
-    for (var j = 0; j < entries.length; j++) {
-      buffers.push(new Buffer(JSON.stringify(entries[j])));
-      buffers.push(newline_buffer);
-    }
-    var output_data = Buffer.concat(buffers);
-    fs.writeFileSync(this.dir + "/F." + file_id, output_data);
-
-    var f = new _JsonLookupTableSimple_File();
-    f.id = file_id;
-    f.start_input_entry = cp_json.pending_level0s[i].start_input_entry;
-    f.n_input_entries = journal_file_lines.length;
-    f.size_entries = entries.length;
-    f.size_bytes = output_data.length;
-    f.older = last_f;
-    if (last_f)  {
-      last_f.newer = f;
-    } else {
-      this.oldest_file = f;
-    }
-    this.newest_file = f;
-
-    f.fd = fs.openSync(this.dir + "/F." + f.id, "r");
-  }
-
   // open merge jobs
   for (var i = 0; i < cp_json.merge_jobs.length; i++) {
     var mj = cp_json.merge_jobs[i];
     for (var f = this.newest_file; f !== null; f = f.older) {
-      if (mj.newer_input_id === f.id) {
+      if (mj.newer.input_id === f.id) {
         assert(f.older.id === mj.older_input_id);
         var merge_job = new _JsonLookupTableSimple_MergeJob();
-        merge_job.output_id = mj.output_id;
-        merge_job.older_input_offset = mj.older_input_offset;
-        merge_job.newer_input_offset = mj.newer_input_offset;
+        merge_job.output_file.id = mj.output_file.id;
+        merge_job.older.input_offset = mj.older.input_offset;
+        merge_job.newer.input_offset = mj.newer.input_offset;
         merge_job.output_offset = mj.output_offset;
-        merge_job.output_fd = fs.openSync(this.dir + "/F." + mj.output_offset, "r+");
-        merge_job.newer_input_file = f;
-        merge_job.older_input_file = f.older;
-        fs.ftruncateSync(merge_job.output_fd, merge_job.output_offset);
+        merge_job.output_file.size_bytes = mj.output_offset;
+        merge_job.output_file.size_entries = mj.output_n_entries;
+        merge_job.output_file.fd = fs.openSync(this.dir + "/F." + mj.output_offset, "r+");
+        merge_job.newer.input_file = f;
+        merge_job.older.input_file = f.older;
+        fs.ftruncateSync(merge_job.output_file.fd, merge_job.output_offset);
         f.merge_job = n.older.merge_job = merge_job;
+
+        this._start_merge_job(merge_job);
+
         break;
       }
     }
     if (f === null)
-      console.log("WARNING: file " + mj.newer_input_id + " not found");
+      console.log("WARNING: file " + mj.newer.input_id + " not found");
   }
 
-  // Clean up CHECKPOINT to not use pending_level0s, since there are all processed now
-  if (cp_json.pending_level0s.length > 0) {
-    var new_cp_json = this._create_checkpoint_json();
-    var new_cp_data = new Buffer(JSON.stringify(new_cp_json));
-    fs.writeFileSync(this.dir + "/CHECKPOINT", new_cp_data);
-    for (var i = 0; i < cp_json.pending_level0s.length; i++) {
-      var id = cp_json.pending_level0s.id;
-      fs.unlinkSync(this.dir + "/JOURNAL." + id);
+  for (var i = 0; i < journal_lines.length; i++) {
+    for (var j = 0; j < journal_lines[i].length; j++) {
+      this.sort_merger.add(journal_lines[i][j]);
     }
   }
 };
 
+function write_sync_n(fd, data, position)
+{
+  var at = 0, rem = data.length, pos = position;
+  while (rem > 0) {
+    var n = fs.writeSync(fd, data, at, rem, pos);
+    at += n;
+    rem -= n;
+    pos += n;
+  }
+}
 
 exports.JsonLookupTableSimple.prototype.add = function(doc, callback)
 {
   var self = this;
   var pot_at = 0;
-  var cur_docs = [doc];
   var level0_docs = null;
-
-  while (true) {
-    if (this.sort_merged.length == pot_at) {
-      level0_docs = cur_docs;
-      break;
-    } else if (this.sort_merged[pot_at] === null) {
-      this.sort_merged[pot_at] = cur_docs;
-      break;
-    } else {
-      var new_merged = this._merge_lists(this.sort_merged[pot_at], cur_docs);
-      this.sort_merged[pot_at] = null;
-      pot_at++;
-      cur_docs = new_merged;
-    }
+  var cur_docs;
+  if (Array.isArray(doc)) {
+    cur_docs = doc;
+  } else {
+    cur_docs = [doc];
   }
-  self.n_latest++;
+
+  this.n_input_entries += cur_docs.length;
+  this.n_input_transactions += 1;
+
+  if (this.journal_num_entries + cur_docs.length > this.journal_max_entries) {
+    this._flush_journal();
+  }
+  for (var i = 0; i < cur_docs.length; i++)
+    this.sort_merger.add(cur_docs[i]);
+  this.journal_num_entries += cur_docs.length;
 
   var pending_requests = 1;
 
@@ -314,19 +372,6 @@ exports.JsonLookupTableSimple.prototype.add = function(doc, callback)
     });
   }
 
-  if (level0_docs !== null) {
-    var file_id = this._allocate_file_id();
-    ++pending_requests;
-    pending_writing_level0_files.push({
-      data: this._sorted_json_to_binary(level0_docs),
-      file_id: file_id,
-      callback: decr_pending_requests
-    });
-    if (!this.writing_level0_file) {
-      this._write_pending_level0_files();
-    }
-  }
-
   // remove re-entrance guard
   decr_pending_requests();
 
@@ -339,6 +384,38 @@ exports.JsonLookupTableSimple.prototype.add = function(doc, callback)
       }
     }
   }
+};
+
+exports.JsonLookupTableSimple.prototype._flush_journal = function()
+{
+  var file_id = this._allocate_file_id();
+  //this.pending_writing_level0_files.push(pending_level0_info);
+  var level0_data = this._sorted_json_to_binary(level0_docs);
+  console.log("writing level0 data to " + file_id);
+  fs.writeFileSync(this.dir + "/F." + file_id, level0_data);
+  this.journal_fd = fs.openSync(this.dir + "/JOURNAL.tmp", "w");
+  var cp_json = this._create_checkpoint_json();
+  var cp_data = new Buffer(JSON.stringify(cp_json) + "\n");
+  write_sync_n(this.journal_fd, cp_data, 0);
+  fs.renameSync(this.dir + "/JOURNAL.tmp", this.dir + "/JOURNAL");
+
+  var f = new _JsonLookupTableSimple_File();
+  f.id = file_id;
+  f.fd = fs.openSync(this.dir + "/F." + file_id, "r");
+  f.size_bytes = level0_data.length;
+  f.size_entries = level0_docs.length;
+  f.start_input_entry = this.journal_start_input_entry;
+  f.n_input_entries = this.journal_num_entries;
+  f.older = this.newest_file;
+  if (f.older)
+    f.older.newer = f;
+  else
+    this.oldest_file = f;
+  this.newest_file = f;
+  this.journal_start_input_entry = this.n_input_entries;
+  this._maybe_start_merge_jobs();
+
+  this.sort_merger.reset();
 };
 
 exports.JsonLookupTableSimple.prototype._flush_pending_write_buffers = function(callback) {
@@ -364,41 +441,166 @@ exports.JsonLookupTableSimple.prototype._flush_pending_write_buffers = function(
   });
 };
 
-exports.JsonLookupTableSimple.prototype._write_pending_level0_files = function() {
-  this.writing_level0_file = true;
-  var self = this;
-  function write_next() {
-    if (self.pending_writing_level0_files.length === 0) {
-      self.writing_level0_file = false;
-      self._maybe_start_merge_jobs();
-      return;
-    } else {
-      var info = self.pending_writing_level0_files[0];
-      self.pending_writing_level0_files.splice(0,1);
-      self._create_file_from_level0_info(info, function(err, created_file) {
-        write_next();
-      });
-    }
-  }
-  write_next();
-};
-
 exports.JsonLookupTableSimple.prototype._maybe_start_merge_jobs = function() {
-  for (var f = self.newest_file; f !== null; f = f.older) {
+  for (var f = this.newest_file; f !== null; f = f.older) {
     if (f.merge_job === null &&
         f.older !== null &&
         f.older.merge_job === null &&
         f.size_bytes > f.older.size_bytes * 0.35)
     {
       var merge_job = new _JsonLookupTableSimple_MergeJob();
-      merge_job.newer_input_file = f;
-      merge_job.older_input_file = f.older;
+      merge_job.newer.input_file = f;
+      merge_job.older.input_file = f.older;
       f.merge_job = f.older.merge_job = merge_job;
 
-      merge_job.output_id = this._allocate_file_id();
-      merge_job.output_fd = fs.openSync(this.dir + "/F." + merge_job.output_id, "w");
+      merge_job.output_file.id = this._allocate_file_id();
+      merge_job.output_file.fd = fs.openSync(this.dir + "/F." + merge_job.output_file.id, "w");
+
+      this._start_merge_job(merge_job);
     }
   }
+};
+
+exports.JsonLookupTableSimple.prototype._start_merge_job = function(merge_job)
+{
+  this._maybe_start_merge_input_read(merge_job, merge_job.newer);
+  this._maybe_start_merge_input_read(merge_job, merge_job.older);
+};
+
+exports.JsonLookupTableSimple.prototype._maybe_start_merge_input_read = function(merge_job, merge_input)
+{
+  if (merge_input.eof)
+    return;
+  if (merge_input.input_offset >= merge_input.file.size_bytes) {
+    merge_input.eof = true;
+    _try_making_merge_output(this, merge_job);
+    return;
+  }
+
+  if (merge_input.peekable.length > 16)
+    return;
+
+  if (merge_input.input_pending)
+    return;
+
+  var read_end = merge_input.input_offset + merge_input.buffer_available;
+  var til_end = merge_input.file.size_bytes - read_end;
+  if (til_end > 0) {
+    var to_read = til_end < 4096 ? til_end : 4096;
+
+    // ensure merge_input.buffer is large enough
+    if (merge_input.buffer.length < merge_input.buffer_available + to_read) {
+      var new_buf = new Buffer(merge_input.buffer_available + to_read);
+      merge_input.buffer.copy(new_buf);
+      merge_input.buffer = new_buf;
+    }
+
+    merge_input.input_pending = true;
+    fs.read(merge_input.file.fd, merge_input.buffer, merge_input.buffer_available,
+            read_end, function(err, bytesRead) {
+              merge_input.buffer_available += bytesRead;
+
+              // parse out any lines; add JSON/length pair to 'pending'.
+              var nl_index;
+              var at = 0;
+              var n_lines = 0;
+              while ((nl_index=find_newline(merge_input.buffer, at, merge_input.buffer_available)) != -1) {
+                var str = merge_input.buffer.slice(at, nl_index).toString();
+                merge_input.pending.push([JSON.parse(str), nl_index + 1 - at]);
+                at = nl_index + 1;
+                n_lines++;
+              }
+
+              merge_input.input_pending = false;
+              if (n_lines === 0) {
+                this._maybe_start_merge_input_read(merge_job, merge_input);
+              } else {
+                _try_making_merge_output(this, merge_job);
+              }
+            });
+  }
+};
+
+exports.JsonLookupTableSimple.prototype._try_making_merge_output = function(merge_job)
+{
+  if (merge_job.newer.eof && merge_job.older.eof) {
+    this._finish_merge_job(merge_job);
+    return;
+  } else {
+    var ready = true;
+    if (merge_job.newer.peekable.length === 0 && !merge_job.newer.eof) {
+      this._maybe_start_merge_input_read(merge_job, newer);
+      ready = false;
+    }
+    if (merge_job.older.peekable.length === 0 && !merge_job.older.eof) {
+      this._maybe_start_merge_input_read(merge_job, older);
+      ready = false;
+    }
+    var outputs = [];
+    var ni = 0, oi = 0;
+    while (ni < merge_job.newer.peekable.length && oi < merge_job.older.peekable.length) {
+      var cmp = this.compare(merge_job.newer.pending[ni][0], merge_job.older.pending[oi][0]);
+      if (cmp < 0) {
+        outputs.push(merge_job.newer.pending[ni++]);
+      } else if (cmp > 0) {
+        outputs.push(merge_job.older.pending[oi++]);
+      } else {
+        var o = merge_job.older.pending[oi++];
+        var n = merge_job.older.pending[ni++];
+        outputs.push(this.merge(o,n));
+      }
+    }
+    while (ni < merge_job.newer.peekable.length && merge_job.older.eof) {
+      outputs.push(merge_job.newer.pending[ni++]);
+    }
+    while (oi < merge_job.older.peekable.length && merge_job.newer.eof) {
+      outputs.push(merge_job.older.pending[oi++]);
+    }
+
+    if (oi > 0) {
+      merge_job.older.remove_first(oi);
+    }
+    if (ni > 0) {
+      merge_job.newer.remove_first(ni);
+    }
+      
+    if (outputs.length > 0) {
+      var output_buffers = [];
+      for (var i = 0; i < outputs.length; i++) {
+        var b = new Buffer(JSON.stringify(outputs[i]));
+        output_buffers.push(b);
+        output_buffers.push(newline_buffer);
+      }
+      var total_output = Buffer.concat(output_buffers);
+      write_sync_n(merge_job.output_file.fd, total_output, merge_job.output_offset);
+      merge_job.output_offset += total_output.length;
+      merge_job.output_file.size_bytes += total_output.length;
+      merge_job.output_file.size_entries += outputs.length;
+    }
+  }
+};
+
+exports.JsonLookupTableSimple.prototype._finish_merge_job = function(merge_job)
+{
+  var output_file = merge_job.output_file;
+
+  //TODO convert fd to read-only
+
+  // replace the two input files with the single new output File
+  output_file.older = merge_job.older.file.older;
+  if (output_file.older)
+    output_file.older.newer = output_file;
+  else
+    this.oldest_file = output_file;
+  output_file.newer = merge_job.newer.file.newer;
+  if (output_file.newer)
+    output_file.newer.older = output_file;
+  else
+    this.newest_file = output_file;
+
+  // Delete these objects if ready.
+  merge_job.older.reduce_ref_count();
+  merge_job.newer.reduce_ref_count();
 };
 
 exports.JsonLookupTableSimple.prototype._create_file_from_level0_info = function(info, callback)
@@ -425,7 +627,7 @@ exports.JsonLookupTableSimple.prototype._sorted_json_to_binary = function(array)
 {
   var buffers = [];
   for (var i = 0; i < array.length; i++) {
-    buffers.push(JSON.stringify(array[i]));
+    buffers.push(new Buffer(JSON.stringify(array[i])));
     buffers.push(newline_buffer);
   }
   return Buffer.concat(buffers);
@@ -453,40 +655,25 @@ exports.JsonLookupTableSimple.prototype._allocate_file_id = function()
   return rv;
 };
 
-exports.JsonLookupTableSimple.prototype._array_lookup = function(curried_comparator, array)
+
+exports.JsonLookupTableSimple.prototype._create_checkpoint_json = function()
 {
-  var start = 0, n = array.length;
-  while (n > 0) {
-    var mid = start + Math.floor(n / 2);
-    var rv = curried_comparator(array[mid]);
-    if (rv < 0)
-      n = mid - start;
-    else if (rv > 0) {
-      var end = start + n;
-      start = mid + 1;
-      n = end - start;
-    } else
-      return array[mid];
+  var files = [], merge_jobs = [];
+  for (var f = this.newest_file; f !== null; f = f.older) {
+    files.push(f.toJSON());
+    if (f.merge_job && f.merge_job.newer.input_file === f)
+      merge_jobs.push(f.merge_job.toJSON());
   }
-  return null;
+  return {files: files,
+          merge_jobs: merge_jobs,
+          next_file_id:this.next_file_id};
 };
 
 // callback(err, result) - both == null: not found.
 exports.JsonLookupTableSimple.prototype.get = function(curried_comparator, callback)
 {
-  var rv = null;
+  var rv = this.sort_merger.get(curried_comparator);
   var self = this;
-  for (var i = 0; i < this.sort_merged.length; i++) {
-    if (this.sort_merged[i]) {
-      var sub_rv = this._array_lookup(curried_comparator, this.sort_merged[i]);
-      if (sub_rv) {
-        if (rv === null)
-	  rv = sub_rv;
-        else
-        rv = this.merge(sub_rv, rv); 
-      }
-    }
-  }
 
   var ignore_merge_job = false;
   var file_results = [];
@@ -584,6 +771,7 @@ function writen_buffer(fd, buffer, offset, length, position, callback)
 
 exports.JsonLookupTableSimple.prototype._do_search_file = function(file, curried_comparator, callback) {
   var self = this;
+  console.log("_do_search_file: file.id=" + file.id + "; byte_size=" + file.size_bytes);
   do_search_range(0, file.size_bytes);
 
   function do_search_range(start, length) {
@@ -597,6 +785,8 @@ exports.JsonLookupTableSimple.prototype._do_search_file = function(file, curried
         } else {
           // split buffer into lines
           var strs = buf.slice(0,buf.length - 1).toString().split("\n");
+
+          console.log("doing binary search of " + strs.length + " entries from " + file.id);
 
           // binary search JSON array
           var obj_start = 0;
@@ -686,4 +876,32 @@ exports.JsonLookupTableSimple.prototype._do_search_file = function(file, curried
       }
     }
   }
+};
+
+exports.JsonLookupTableSimple.prototype._close = function(deleteFiles) {
+  // Delete files + merge-jobs
+  for (var f = this.oldest_file; f !== null; f = f.newer) {
+    if (f.merge_job) {
+      assert(f.newer.merge_job === f.merge_job);
+      fs.closeSync(f.merge_job.output_file.fd);
+      if (deleteFiles)
+        fs.unlinkSync(this.dir + "/F." + f.merge_job.output_file.id);
+    }
+    fs.closeSync(f.fd);
+    if (deleteFiles)
+      fs.unlinkSync(this.dir + "/F." + f.id);
+  }
+
+  fs.closeSync(this.dir_fd);
+  fs.closeSync(this.journal_fd);
+  if (deleteFiles) {
+    fs.unlinkSync(this.dir + "/JOURNAL");
+    fs.rmdirSync(this.dir);
+  }
+}
+exports.JsonLookupTableSimple.prototype.close = function() {
+  this._close(false);
+};
+exports.JsonLookupTableSimple.prototype.closeAndDelete = function() {
+  this._close(true);
 };
