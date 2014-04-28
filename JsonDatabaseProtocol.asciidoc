@@ -1,0 +1,60 @@
+Document Datastore Interface
+----------------------------
+This a database protocol specifically for providing implementing a
+backend for Kudo, but the protocol is quite general.
+
+
+Methods
+~~~~~~~
+These are the messages that the client may send to a server.
+
+
+GET
+^^^
+   GET(key)
+Return either an object or null.
+
+.GET Request format:
+[options="header",width="50%"]
+|============
+|Data|Format
+|0x8899aa00|u32le
+|length of payload|u32le
+|request_id|u32le
+|key|binary
+|============
+
+.GET Response format:
+[options="header",width="50%"]
+|============
+|Data|Format
+|0x8899bb00|u32le
+|length of payload|u32le
+|request_id|u32le
+|object or null|binary
+|============
+
+
+
+
+...
+
+   UPDATE(object)
+
+...
+
+   UPDATE(array_of_objects)
+
+...
+
+   DELETE(key)
+
+...
+
+   TRAP(key)
+
+...
+
+   UNTRAP(key)
+
+...

@@ -56,23 +56,24 @@ exports.merge = function(a,b)
   }
 };
 
-exports.final_merge = function(a, default_value)
-{
-  if (a.deleted)
-    return null;
-  else if (a.value)
-    return a;
-  else if (a.updates && a.updates.length > 0) {
-    a.value = default_value;
-    for (var i = 0; i < a.updates.length; i++)
-      a.value = apply_update(a.value, a.updates[i]);
-    delete a.updates;
-    return a;
-  } else {
-    a.value = default_value;
-    delete a.updates;
-    return a;
-  }
+exports.make_final_merge_function = function(default_value) {
+  return function(a) {
+    if (a.deleted)
+      return null;
+    else if (a.value)
+      return a;
+    else if (a.updates && a.updates.length > 0) {
+      a.value = default_value;
+      for (var i = 0; i < a.updates.length; i++)
+        a.value = apply_update(a.value, a.updates[i]);
+      delete a.updates;
+      return a;
+    } else {
+      a.value = default_value;
+      delete a.updates;
+      return a;
+    }
+  };
 };
 
 // May modify value, and may return 'value' (post-modification).
@@ -103,19 +104,59 @@ function apply_update(value, update)
         v = v[update_path[p]];
       }
       v.push(update_info);
-      break;
+      return value;
     case 'append_unique':
-      ...
-      break;
+      var v = value;
+      for (var p = 0; p < update_path.length; p++) {
+        if (!(update_path[p] in v))
+          v[update_path[p]] = p == update_path.length - 1 ? [] : {};
+        v = v[update_path[p]];
+      }
+      var i = v.indexOf(update_info);
+      if (i >= 0) {
+        if (i != v.length - 1) {
+          v.splice(i,1);
+          v.push(update_info);
+        }
+      } else {
+        v.push(update_info);
+      }
+      return value;
     case 'set':
-      ...
-      break;
+      if (update_path.length === 0) {
+        return update_info;
+      else {
+        for (var p = 0; p < update_path.length - 1; p++) {
+          if (!(update_path[p] in v))
+            v[update_path[p]] = {};
+          v = v[update_path[p]];
+        }
+        v[update_path[p]] = update_info;
+      }
+      return value;
     case 'delete':
-      ...
-      break;
+      assert (update_path.length > 0);
+      for (var p = 0; p < update_path.length - 1; p++) {
+        if (!(update_path[p] in v))
+          return value;
+        v = v[update_path[p]];
+      }
+      delete v[update_path[p]];
+      return value;
     case 'clip_list':
-      ...
-      break;
+      for (var p = 0; p < update_path.length; p++) {
+        if (!(update_path[p] in v))
+          return value;
+        v = v[update_path[p]];
+      }
+      if (v.length > update_info.max_length) {
+        if (update_info.remove_from_front)
+          v.splice(0, v.length - update_info.max_length);
+        } else {
+          v.splice(update_info.max_length, v.length - update_info.max_length);
+        }
+      }
+      return value;
   }
 }
 

@@ -771,7 +771,6 @@ function writen_buffer(fd, buffer, offset, length, position, callback)
 
 exports.JsonLookupTableSimple.prototype._do_search_file = function(file, curried_comparator, callback) {
   var self = this;
-  console.log("_do_search_file: file.id=" + file.id + "; byte_size=" + file.size_bytes);
   do_search_range(0, file.size_bytes);
 
   function do_search_range(start, length) {
@@ -898,7 +897,7 @@ exports.JsonLookupTableSimple.prototype._close = function(deleteFiles) {
     fs.unlinkSync(this.dir + "/JOURNAL");
     fs.rmdirSync(this.dir);
   }
-}
+};
 exports.JsonLookupTableSimple.prototype.close = function() {
   this._close(false);
 };
