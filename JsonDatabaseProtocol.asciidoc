@@ -9,6 +9,40 @@ Methods
 These are the messages that the client may send to a server.
 
 
+LOGIN
+^^^^^
+   LOGIN(credentials_and_options)
+
+.LOGIN Request format:
+[options="header",width="50%"]
+|============
+|Data|Format
+|0x88997700|u32le
+|0|u32le
+|length of payload|u32le
+|credentials_and_options|JSON
+|============
+
+.LOGGED_IN Request format:
+[options="header",width="50%"]
+|============
+|Data|Format
+|0x88997701|u32le
+|0|u32le
+|length of payload|u32le
+|options|JSON
+|============
+
+.LOG_IN_FAILED Request format:
+[options="header",width="50%"]
+|============
+|Data|Format
+|0x88997702|u32le
+|0|u32le
+|length of payload|u32le
+|reason|string
+|============
+
 GET
 ^^^
    GET(key)
@@ -19,42 +53,105 @@ Return either an object or null.
 |============
 |Data|Format
 |0x8899aa00|u32le
-|length of payload|u32le
 |request_id|u32le
+|length of payload|u32le
 |key|binary
 |============
 
-.GET Response format:
+One of the following responses will be given:
+
+.GET Response format - found.
 [options="header",width="50%"]
 |============
 |Data|Format
 |0x8899bb00|u32le
-|length of payload|u32le
 |request_id|u32le
-|object or null|binary
+|length of payload|u32le
+|object|binary
+|============
+
+.GET Response format - not found.
+[options="header",width="50%"]
+|============
+|Data|Format
+|0x8899bb01|u32le
+|request_id|u32le
+|length of payload|u32le
+|string|object id
 |============
 
 
-
-
-...
-
+UPDATE
+^^^^^^
    UPDATE(object)
 
-...
+.UPDATE Request format:
+[options="header",width="50%"]
+|============
+|Data|Format
+|0x8899aa01|u32le
+|request_id|u32le
+|length of payload|u32le
+|object or array|JSON
+|============
 
-   UPDATE(array_of_objects)
 
-...
+.UPDATE Response format - success
+[options="header",width="50%"]
+|============
+|Data|Format
+|0x8899bb02|u32le
+|request_id|u32le
+|length of payload = 4|u32le
+|============
 
-   DELETE(key)
+.UPDATE Response format - failed
+[options="header",width="50%"]
+|============
+|Data|Format
+|0x8899bb03|u32le
+|request_id|u32le
+|length of payload|u32le
+|error|string UTF-8
+|============
 
-...
+.TRAP Request format
+[options="header",width="50%"]
+|============
+|Data|Format
+|0x8899aa02|u32le
+|request_id|u32le
+|length of payload|u32le
+|object_id|string
+|============
 
-   TRAP(key)
+.CHANGED Message
+[options="header",width="50%"]
+|============
+|Data|Format
+|0x8899bb05|u32le
+|0 (would be request_id)|u32le
+|length of payload|u32le
+|object|JSON
+|============
 
-...
 
-   UNTRAP(key)
+.UNTRAP Request format
+[options="header",width="50%"]
+|============
+|Data|Format
+|0x8899aa03|u32le
+|request_id|u32le
+|length of payload|u32le
+|object_id|string
+|============
 
-...
+.ERROR Response format
+[options="header",width="50%"]
+|============
+|Data|Format
+|0x8899bc00|u32le
+|request_id|u32le
+|length of payload|u32le
+|message|string
+|============
