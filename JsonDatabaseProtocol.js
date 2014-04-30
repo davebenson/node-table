@@ -15,3 +15,5 @@ exports.TRAP_REQUEST = 0x8899aa02;
 exports.UNTRAP_REQUEST = 0x8899aa03;
 
 exports.CHANGED_MESSAGE = 0x8899bb05;
+
+exports.ERROR_RESPONSE = 0x8899cc00;

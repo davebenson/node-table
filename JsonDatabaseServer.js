@@ -1,5 +1,6 @@
 
 var net = require("net");
+var JsonDatabaseProtocol = require("./JsonDatabaseProtocol");
 
 function handle_socket(socket, server, db)
 {
@@ -40,7 +41,7 @@ function handle_socket(socket, server, db)
   function handle_input_command(cmd, request_id, payload)
   {
     switch(cmd) {
-      case 0x8899aa00: // get command
+      case JsonDatabaseProtocol.GET_REQUEST: // get command
         var id = payload.toString();
         db.get(id, function(err, rv) {
           if (err) { 
@@ -52,7 +53,7 @@ function handle_socket(socket, server, db)
           }
         });
         break;
-      case 0x8899aa01: // update command
+      case JsonDatabaseProtocol.UPDATE_REQUEST: // update command
         var doc = JSON.parse(payload.toString());
         db.add(doc, function(err) {
           if (err) {
@@ -62,10 +63,10 @@ function handle_socket(socket, server, db)
           }
         });
         break;
-      case 0x8899aa02: // trap command
+      case JsonDatabaseProtocol.TRAP_REQUEST: // trap command
         db.trap_cache.trap(payload.toString(), connection_id, db);
         break;
-      case 0x8899aa03: // untrap command
+      case JsonDatabaseProtocol.UNTRAP_REQUEST: // untrap command
         db.trap_cache.untrap(payload.toString(), connection_id, db);
         break;
       default:
@@ -74,8 +75,13 @@ function handle_socket(socket, server, db)
         break;
     }
   }
-  function send_error_response(...)
+  function send_error_response(request_id, message)
   {
+    send_response(JsonDatabaseProtocol.ERROR_RESPONSE, request_id, message);
+  }
+  function send_response(response_type, request_id, payload)
+  {
+    ...
   }
 }
 
