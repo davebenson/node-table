@@ -2,6 +2,16 @@ var net = require("net");
 var fs = require("fs");
 var JsonDatabaseProtocol = require("./JsonDatabaseProtocol");
 
+// TODO: cut-n-pasted from JsonDatabaseServer
+function normalize_payload(payload)
+{
+  if (Buffer.isBuffer(payload))
+    return payload;
+  if (typeof(payload) === 'string')
+    return new Buffer(payload);
+  return new Buffer(JSON.stringify(payload));
+}
+
 function JsonDatabaseClient(options)
 {
   this.aob = [];
@@ -47,13 +57,7 @@ function JsonDatabaseClient(options)
   };
 }
 JsonDatabaseClient.prototype.send_message = function(response_type, request_id, payload) {
-    if (Buffer.isBuffer(payload)) {
-      // payload is already binary
-    } else if (typeof(payload) === 'string') {
-      payload = new Buffer(payload);
-    } else {
-      payload = new Buffer(JSON.stringify(payload));
-    }
+    payload = normalize_payload);
     var header = new Buffer(12);
     header.writeUInt32LE(response_type, 0);
     header.writeUInt32LE(request_id, 4);
