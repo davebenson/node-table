@@ -113,7 +113,7 @@ exports.create_server = function(options)
 {
   var db = options.database;
   var port = options.port;
-  var server = net.create_server(function(socket) {
+  var server = net.createServer(function(socket) {
     handle_socket(socket, server, db);
   });
   server.listen(port);

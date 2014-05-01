@@ -42,7 +42,7 @@ exports.merge = function(a,b)
   var remove_ids = [];
   if ("remove_ids" in a) {
     for (var i = 0; i < a.remove_ids.length; i++) {
-      if (!("ids in b) || b.ids.indexOf(a.remove_ids[i]) < 0)
+      if (!("ids" in b) || b.ids.indexOf(a.remove_ids[i]) < 0)
         remove_ids.push(a.remove_ids[i]);
     }
   }

@@ -20,10 +20,20 @@ function JsonDatabaseClient(options)
 
   this.state = 'CONNECTING';
   this.port = options.port;
-  var self = this;
+  this.reconnect_period = 250;
+  this.reconnect_timer = null;
 
-  this.socket = net.createConnection(options.port, options.host);
+  this._do_connect();
+}
+
+JsonDatabaseClient.prototype._do_connect = function()
+{
+  var self = this;
+  var socket = net.createConnection(options.port, options.host);
+  this.socket = socket;
   this.socket.on("data", function(data) {
+    if (this.socket !== socket)
+      return;
     self.aob.push(data);
     self.incoming_size += data.length;
 
@@ -33,7 +43,7 @@ function JsonDatabaseClient(options)
         self._consolidate_incoming_buffers();
       var payload_length = self.aob[0].readUInt32(self.first_buffer_offset + 8);
 
-      if (this.incoming_size < 12 + payload_length)
+      if (self.incoming_size < 12 + payload_length)
         break;
 
       if (self.aob[0].length - self.first_buffer_offset < 12 + payload_length)
@@ -42,12 +52,25 @@ function JsonDatabaseClient(options)
       handle_incoming(self.aob[0].readUInt32(self.first_buffer_offset),
                       self.aob[0].readUInt32(self.first_buffer_offset + 4),
                       self.aob[0].slice(self.first_buffer_offset, payload_length));
-      this.incoming_size -= 12 + payload_length;
-      this.first_buffer_offset += 12 + payload_length;
+      self.incoming_size -= 12 + payload_length;
+      self.first_buffer_offset += 12 + payload_length;
     }
+  }).on("connect", function() {
+    if (self.socket !== socket)
+      return;
+    if (self.state !== 'CONNECTING')
+      console.log("bad state: 'connect' which not 'CONNECTING'");
+    self.state = 'CONNECTED';
   }).on("end", function() {
+    if (self.socket !== socket)
+      return;
     // try reconnect?
-    ...
+    self.state = 'DISCONNECTED';
+    assert(self.reconnect_timer === null);
+    self.reconnect_timer = setTimeout(function() {
+      self.reconnect_timer = null;
+      self._do_connect();
+    });
   });
 
   this.send_message(..., 0, {});
@@ -55,7 +78,7 @@ function JsonDatabaseClient(options)
   function handle_incoming(response_type, request_id, payload) {
     ...
   };
-}
+};
 JsonDatabaseClient.prototype.send_message = function(response_type, request_id, payload) {
     payload = normalize_payload);
     var header = new Buffer(12);
