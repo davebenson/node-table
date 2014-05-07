@@ -23,11 +23,11 @@ function TrapCache_Target(target_id)
   this.n_traps = 0;
 }
 
-module.exports = function() {
-  this.objects = {};
+exports.TrapCache = function() {
+  this.targets = {};
 };
 
-module.exports.prototype.trap = function(id, target_id)
+exports.TrapCache.prototype.trap = function(id, target_id)
 {
   var target = this.targets[target_id];
   if (!target) {
@@ -65,7 +65,7 @@ function remove_trap_from_object_list(t, o)
     o.last_trap = t.prev_in_object;
 }
 
-module.exports.prototype.untrap = function(id, target_id)
+exports.TrapCache.prototype.untrap = function(id, target_id)
 {
   var target = this.targets[target_id];
   if (!target)
@@ -86,7 +86,7 @@ module.exports.prototype.untrap = function(id, target_id)
   }
 };
 
-module.exports.prototype.notify = function(object)
+exports.TrapCache.prototype.notify = function(object)
 {
   var o = this.objects[object.id];
   if (!o)
@@ -107,7 +107,7 @@ module.exports.prototype.notify = function(object)
   }
 };
 
-module.exports.prototype.untrap_target = function(target_id)
+exports.TrapCache.prototype.untrap_target = function(target_id)
 {
   var target = this.targets[target_id];
   if (!target)

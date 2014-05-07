@@ -16,3 +16,15 @@ exports.UNTRAP_REQUEST = 0x8899aa03;
 exports.CHANGED_MESSAGE = 0x8899bb05;
 
 exports.ERROR_RESPONSE = 0x8899cc00;
+
+exports.code_to_name = {};
+var codes = ["LOGIN", "LOGGED_IN", "LOG_IN_FAILED",
+             "GET_REQUEST", "GET_RESPONSE_FOUND", "GET_RESPONSE_NOT_FOUND",
+             "UPDATE_REQUEST", "UPDATE_RESPONSE_OK",
+             "TRAP_REQUEST", "UNTRAP_REQUEST",
+             "CHANGED_MESSAGE",
+             "ERROR_RESPONSE"];
+for (var i = 0; i < codes.length; i++) {
+  exports.code_to_name[exports[codes[i]]] = codes[i];
+}
+

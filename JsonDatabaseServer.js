@@ -1,7 +1,7 @@
 
 var net = require("net");
 var JsonDatabaseProtocol = require("./JsonDatabaseProtocol");
-var TrapCache = require("./TrapCache");
+var TrapCache = require("./TrapCache").TrapCache;
 var next_connection_id = 1;
 
 function allocate_connection_id()
@@ -31,27 +31,29 @@ function handle_socket(socket, server, db)
     while (aob_total >= 12) {
       if (aob[0].length < first_buffer_used + 12) {
         if (first_buffer_used > 0)
-          aob[0] = aof[0].slice(first_buffer_used);
+          aob[0] = aob[0].slice(first_buffer_used);
         first_buffer_used = 0;
         aob = [Buffer.concat(aob)];
       }
 
-      var payload_len = aob[0].readUInt32LE(4);
+
+      var payload_len = aob[0].readUInt32LE(8);
       if (aob_total < 12 + payload_len) {
         break;
       }
       if (aob[0].length - first_buffer_used < 12 + payload_len) {
         if (first_buffer_used > 0)
-          aob[0] = aof[0].slice(first_buffer_used);
+          aob[0] = aob[0].slice(first_buffer_used);
         first_buffer_used = 0;
         aob = [Buffer.concat(aob)];
       }
       handle_input_command(aob[0].readUInt32LE(0),
-                           aob[0].readUInt32LE(8),
+                           aob[0].readUInt32LE(4),
                            aob[0].slice(12, 12+payload_len));
       first_buffer_used += 12 + payload_len;
+      aob_total -= 12 + payload_len;
     }
-  }).on("end", function() {
+  }).on("close", function() {
     // untrap all!
     trap_cache.untrap_target(connection_id);
   });
@@ -59,11 +61,16 @@ function handle_socket(socket, server, db)
   function handle_input_command(cmd, request_id, payload)
   {
     switch(cmd) {
+      case JsonDatabaseProtocol.LOGIN: {
+        send_response(JsonDatabaseProtocol.LOGGED_IN, request_id, {});
+        break;
+      }
       case JsonDatabaseProtocol.GET_REQUEST: // get command
         var id = payload.toString();
-        db.get(id, function(err, rv) {
+        var cmp = db.make_curried_comparator(id);
+        db.get(cmp, function(err, rv) {
           if (err) { 
-            send_error_response(err.toString());
+            send_error_response(request_id, err.toString());
           } else if (rv === null) {
             send_response(JsonDatabaseProtocol.GET_RESPONSE_NOT_FOUND, request_id, "");
           } else {
@@ -72,10 +79,17 @@ function handle_socket(socket, server, db)
         });
         break;
       case JsonDatabaseProtocol.UPDATE_REQUEST: // update command
-        var doc = JSON.parse(payload.toString());
+        var doc;
+        try {
+          doc = JSON.parse(payload.toString());
+        } catch (e) {
+          send_error_response(request_id, e.toString());
+          return;
+        }
+          
         db.add(doc, function(err) {
           if (err) {
-            send_error_response(err.toString());
+            send_error_response(request_id, err.toString());
           } else {
             send_response(JsonDatabaseProtocol.UPDATE_RESPONSE_OK, request_id, "");
           }
@@ -89,7 +103,7 @@ function handle_socket(socket, server, db)
         break;
       default:
         // unknown command
-        send_error_response("unknown command " + cmd + "; ignoring request");
+        send_error_response(request_id, "unknown command " + cmd + "; ignoring request");
         break;
     }
   }

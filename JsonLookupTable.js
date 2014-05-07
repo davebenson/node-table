@@ -28,9 +28,11 @@ function _JsonLookupTableSimple_MergeInput() {
   this.input_offset = 0;
   this.input_file = null;
   this.input_pending = false;
-  this.input_buffer = new Buffer();
-  this.input_peeked_json = null;
-  this.input_peeked_json_size = 0;
+  this.buffer = new Buffer(0);
+  this.buffer_available = 0; // amount of buffer in 'peekable'
+  this.buffer_valid_length = 0;
+  this.peekable = [];
+  this.eof = false;
 }
 _JsonLookupTableSimple_MergeInput.prototype.toJSON = function() {
   return {
@@ -40,9 +42,18 @@ _JsonLookupTableSimple_MergeInput.prototype.toJSON = function() {
 };
 _JsonLookupTableSimple_MergeInput.prototype.remove_first = function(n)
 {
+  var s = 0;
   for (var i = 0; i < n; i++)
-    this.input_offset += this.pending[i][1];
-  this.pending.splice(0, n);
+    s += this.peekable[i][1];
+  this.input_offset += s;
+
+  // remove 's' bytes from start of buffer
+  var new_buffer = new Buffer(this.buffer.length - s);
+  this.buffer.copy(new_buffer, 0, s, this.buffer_valid_length);
+  this.buffer = new_buffer;
+  this.buffer_available -= s;
+  this.buffer_valid_length -= s;
+  this.peekable.splice(0, n);
   if (this.length === 0
    && this.input_offset >= this.file.size_bytes)
     this.eof = true;
@@ -53,6 +64,8 @@ function _JsonLookupTableSimple_MergeJob() {
 
   this.output_file = new _JsonLookupTableSimple_File();
   this.output_offset = 0;
+  this.last_output = null;
+  this.finished = false;
 }
 _JsonLookupTableSimple_MergeJob.prototype.toJSON = function() {
   return {
@@ -75,6 +88,7 @@ function _JsonLookupTableSimple_File() {
   this.older = null;
   this.merge_job = null;
   this.ref_count = 1;
+  this.filename = null;
 }
 _JsonLookupTableSimple_File.prototype.toJSON = function() {
   return {
@@ -84,6 +98,19 @@ _JsonLookupTableSimple_File.prototype.toJSON = function() {
     size_bytes: this.size_bytes,
     size_entries: this.size_entries,
   };
+};
+_JsonLookupTableSimple_File.prototype.ref = function() {
+  assert(this.ref_count > 0);
+  ++this.ref_count;
+};
+_JsonLookupTableSimple_File.prototype.unref = function() {
+  console.log("unref of file " + this.id);
+  assert(this.ref_count > 0);
+  if (--this.ref_count === 0) {
+    fs.unlink(this.filename, function(err) {
+      console.log("unlink " + this.filename + " failed: " + err);
+    });
+  }
 };
 
 function _JsonLookupTableSimple_SortMergeInMemory(compare, merge) {
@@ -134,6 +161,7 @@ _JsonLookupTableSimple_SortMergeInMemory.prototype.reset = function()
 _JsonLookupTableSimple_SortMergeInMemory.prototype.get_list = function()
 {
   var rv = null;
+  var lol = this.lol;
   for (var i = 0; i < lol.length; i++)
     if (lol[i] !== null) {
       if (rv === null)
@@ -187,7 +215,9 @@ exports.JsonLookupTableSimple = function(options) {
   this.journal_write_pending_buffers = [];
   this.journal_write_pending_callbacks = [];
   this.journal_start_input_entry = 0;
+  this.journal_num_entries = 0;
   this.journal_max_entries = options.journal_max_entries || DEFAULT_JOURNAL_MAX_ENTRIES;
+  this.last_journal_files = [];
   //this.writing_level0_block = false;
   //this.pending_writing_level0_files = [];
   this.compare = options.compare;
@@ -199,6 +229,7 @@ exports.JsonLookupTableSimple = function(options) {
   this.dir_fd = -1;
   this.journal_fd = -1;
   this.journal_offset = 0;
+  this.make_curried_comparator = options.make_curried_comparator;
 
   try {
     this.dir_fd = fs.openSync(this.dir, "r");
@@ -218,8 +249,14 @@ exports.JsonLookupTableSimple = function(options) {
     assert(cp_data[cp_data.length - 1] === 0x0a);
     var lines = cp_data.slice(0,cp_data.length - 1).toString().split("\n");
     cp_json = JSON.parse(lines[0]);
-    for (var i = 1; i < lines.length; i++)
-      journal_lines.push(JSON.parse(lines[i]));
+    for (var i = 1; i < lines.length; i++) {
+      try {
+        journal_lines.push(JSON.parse(lines[i]));
+      } catch(se) {
+        console.log("corrupted JSON line");
+      }
+    }
+    this.journal_offset = cp_data.length;
   } catch (e) {
     if (e.code !== 'ENOENT') {
       throw(e);
@@ -234,8 +271,10 @@ exports.JsonLookupTableSimple = function(options) {
     // Create empty checkpoint.
     cp_json = {files: [],
                merge_jobs: [],
+               n_input_entries: 0,
                next_file_id: 1};
     var cp_data = new Buffer(JSON.stringify(cp_json) + "\n");
+    this.journal_offset = cp_data.length;
     fs.writeFileSync(this.dir + "/JOURNAL", cp_data);
   }
 
@@ -247,6 +286,7 @@ exports.JsonLookupTableSimple = function(options) {
 
   // open files; create files list
   var last_f = null;
+  var cp_files = [];
   for (var i = 0; i < cp_json.files.length; i++) {
     var f = new _JsonLookupTableSimple_File();
     var info = cp_json.files[i];
@@ -262,8 +302,13 @@ exports.JsonLookupTableSimple = function(options) {
       this.newest_file = f;
     this.oldest_file = f;
     last_f = f;
+    f.filename = this.dir + "/F." + f.id;
 
-    f.fd = fs.openSync(this.dir + "/F." + f.id, "r");
+    f.fd = fs.openSync(f.filename, "r");
+    console.log("open file " + f.id + " on fd " + f.fd);
+
+    cp_files.push(f);
+    f.ref();
   }
 
   // open merge jobs
@@ -273,13 +318,18 @@ exports.JsonLookupTableSimple = function(options) {
       if (mj.newer.input_id === f.id) {
         assert(f.older.id === mj.older_input_id);
         var merge_job = new _JsonLookupTableSimple_MergeJob();
+        console.log("creating mergejob from cp: " + mj.older.input_file.id + " and " + mj.newer.input_file.id);
         merge_job.output_file.id = mj.output_file.id;
         merge_job.older.input_offset = mj.older.input_offset;
         merge_job.newer.input_offset = mj.newer.input_offset;
         merge_job.output_offset = mj.output_offset;
         merge_job.output_file.size_bytes = mj.output_offset;
         merge_job.output_file.size_entries = mj.output_n_entries;
-        merge_job.output_file.fd = fs.openSync(this.dir + "/F." + mj.output_offset, "r+");
+        merge_job.output_file.filename = this.dir + "/F." + merge_job.output_file.id;
+        merge_job.output_file.fd = fs.openSync(merge_job.output_file.filename, "r+");
+        merge_job.output_file.start_input_entry = merge_job.older.input_file.start_input_entry;
+        merge_job.output_file.n_input_entries = merge_job.older.input_file.n_input_entries + merge_job.newer.input_file.n_input_entries;
+        console.log("merge_job: open file " + merge_job.output_file.id + " on fd " + merge_job.output_file.fd);
         merge_job.newer.input_file = f;
         merge_job.older.input_file = f.older;
         fs.ftruncateSync(merge_job.output_file.fd, merge_job.output_offset);
@@ -295,10 +345,19 @@ exports.JsonLookupTableSimple = function(options) {
   }
 
   for (var i = 0; i < journal_lines.length; i++) {
-    for (var j = 0; j < journal_lines[i].length; j++) {
-      this.sort_merger.add(journal_lines[i][j]);
+    if (Array.isArray(journal_lines[i])) {
+      for (var j = 0; j < journal_lines[i].length; j++) {
+        this.sort_merger.add(journal_lines[i][j]);
+        this.n_input_entries++;
+        this.journal_num_entries++;
+      }
+    } else {
+      this.sort_merger.add(journal_lines[i]);
+      this.n_input_entries++;
+      this.journal_num_entries++;
     }
   }
+  this.last_journal_files = cp_files;
 };
 
 function write_sync_n(fd, data, position)
@@ -346,8 +405,8 @@ exports.JsonLookupTableSimple.prototype.add = function(doc, callback)
     this.journal_write_pending = true;
     var this_err = null;
     if (this.journal_fd === -1) {
-      assert.equal(this.journal_offset, 0);
-      this.journal_fd = fs.openSync(this.dir + "/JOURNAL", "w");
+      //assert.equal(this.journal_offset, 0);
+      this.journal_fd = fs.openSync(this.dir + "/JOURNAL", "r+");
     }
     writen_buffer(this.journal_fd, buf, 0, buf.length, this.journal_offset, function(err) {
       if (err) {
@@ -360,12 +419,15 @@ exports.JsonLookupTableSimple.prototype.add = function(doc, callback)
         this_err = err;
         decr_pending_requests();
       } else if (self.journal_write_pending_buffers.length > 0) {
-        self._flush_pending_write_buffers(function(err) {
+        this.journal_offset += buf.length;
+        console.log("flushing pending write buffers (" + self.journal_write_pending_buffers.length + ")");
+        self._flush_pending_journal_write_buffers(function(err) {
           if (err)
-	    console.log("_flush_pending_write_buffers failed: " + err);
+	    console.log("_flush_pending_journal_write_buffers failed: " + err);
           decr_pending_requests();
         });
       } else {
+        this.journal_offset += buf.length;
         self.journal_write_pending = false;
         decr_pending_requests();
       }
@@ -376,7 +438,7 @@ exports.JsonLookupTableSimple.prototype.add = function(doc, callback)
   decr_pending_requests();
 
   function decr_pending_requests() {
-    if (--pending_requests == 0) {
+    if (--pending_requests === 0) {
       if (this_err) {
         callback(this_err);
       } else {
@@ -390,18 +452,29 @@ exports.JsonLookupTableSimple.prototype._flush_journal = function()
 {
   var file_id = this._allocate_file_id();
   //this.pending_writing_level0_files.push(pending_level0_info);
+  var level0_docs = this.sort_merger.get_list();
   var level0_data = this._sorted_json_to_binary(level0_docs);
   console.log("writing level0 data to " + file_id);
   fs.writeFileSync(this.dir + "/F." + file_id, level0_data);
   this.journal_fd = fs.openSync(this.dir + "/JOURNAL.tmp", "w");
+
+  var cp_files = [];
+  for (var file = this.newest_file; file !== null; file = file.older) {
+    cp_files.push(file);
+    file.ref();
+  }
+
   var cp_json = this._create_checkpoint_json();
   var cp_data = new Buffer(JSON.stringify(cp_json) + "\n");
   write_sync_n(this.journal_fd, cp_data, 0);
   fs.renameSync(this.dir + "/JOURNAL.tmp", this.dir + "/JOURNAL");
+  this.journal_offset = cp_data.length;
 
   var f = new _JsonLookupTableSimple_File();
   f.id = file_id;
-  f.fd = fs.openSync(this.dir + "/F." + file_id, "r");
+  f.filename = this.dir + "/F." + file_id;
+  f.fd = fs.openSync(f.filename, "r");
+  console.log("level0 file " + f.id + " on fd " + f.fd + "[filename " + f.filename + "]");
   f.size_bytes = level0_data.length;
   f.size_entries = level0_docs.length;
   f.start_input_entry = this.journal_start_input_entry;
@@ -414,11 +487,28 @@ exports.JsonLookupTableSimple.prototype._flush_journal = function()
   this.newest_file = f;
   this.journal_start_input_entry = this.n_input_entries;
   this._maybe_start_merge_jobs();
+  this.journal_num_entries = 0;
 
   this.sort_merger.reset();
+
+  for (var i = 0; i < this.last_journal_files.length; i++)
+    this.last_journal_files[i].unref();
+  this.last_journal_files = cp_files;
 };
 
-exports.JsonLookupTableSimple.prototype._flush_pending_write_buffers = function(callback) {
+function writen_sync(fd, buffer, offset, length, position)
+{
+  var at = 0;
+  while (at < length) {
+    var written = fs.writeSync(fd,buffer,offset+at, length-at, position+at);
+    at += written;
+  }
+}
+
+// Called internally when a write call to the journal has finished,
+// but pending writes have accumulated meanwhile.
+exports.JsonLookupTableSimple.prototype._flush_pending_journal_write_buffers =
+function(callback) {
   var self = this;
   assert(this.journal_write_pending_buffers.length > 0);
   assert(this.journal_write_pending);
@@ -426,19 +516,23 @@ exports.JsonLookupTableSimple.prototype._flush_pending_write_buffers = function(
   var buf = Buffer.concat(this.journal_write_pending_buffers);
   this.journal_write_pending_callbacks = [];
   this.journal_write_pending_buffers = [];
-  this.journal_stream.write(buf, function(err) {
-    for (var i = 0; i < cbs.length; i++)
-      cbs[i](err);
-    if (err) {
-      this.journal_write_pending = false;
-      callback(err);
-    } else if (self.journal_write_pending_callbacks.length > 0)
-      self._flush_pending_write_buffers(callback);
-    else {
-      this.journal_write_pending = false;
-      callback(null);
+
+  writen_buffer(this.journal_fd, buf, 0, buf.length, this.journal_offset,
+    function(err) {
+      for (var i = 0; i < cbs.length; i++) {
+        var cb = cbs[i];
+        cb(err);
+      }
+      if (!err)
+        self.journal_offset += buf.length;
+      if (!err && self.journal_write_pending_buffers.ength > 0) {
+        self._flush_pending_journal_write_buffers(callback);
+      } else {
+        this.journal_write_pending = false;
+        callback(err);
+      }
     }
-  });
+  );
 };
 
 exports.JsonLookupTableSimple.prototype._maybe_start_merge_jobs = function() {
@@ -454,7 +548,11 @@ exports.JsonLookupTableSimple.prototype._maybe_start_merge_jobs = function() {
       f.merge_job = f.older.merge_job = merge_job;
 
       merge_job.output_file.id = this._allocate_file_id();
-      merge_job.output_file.fd = fs.openSync(this.dir + "/F." + merge_job.output_file.id, "w");
+      console.log("creating merge job between " + f.older.id + " and " + f.id + " (=> " + merge_job.output_file.id + ")");
+      merge_job.output_file.filename = this.dir + "/F." + merge_job.output_file.id;
+      merge_job.output_file.fd = fs.openSync(merge_job.output_file.filename, "w+");
+      merge_job.output_file.start_input_entry = merge_job.older.start_input_entry;
+      merge_job.output_file.n_input_entries = merge_job.older.n_input_entries + merge_job.newer.n_input_entries;
 
       this._start_merge_job(merge_job);
     }
@@ -463,59 +561,81 @@ exports.JsonLookupTableSimple.prototype._maybe_start_merge_jobs = function() {
 
 exports.JsonLookupTableSimple.prototype._start_merge_job = function(merge_job)
 {
+  console.log("_start_merge_job");
   this._maybe_start_merge_input_read(merge_job, merge_job.newer);
   this._maybe_start_merge_input_read(merge_job, merge_job.older);
 };
 
+function find_newline(buffer, start, end)
+{
+  for (var i = start; i < end; i++)
+    if (buffer[i] === 0x0a)
+      return i;
+  return -1;
+}
+
 exports.JsonLookupTableSimple.prototype._maybe_start_merge_input_read = function(merge_job, merge_input)
 {
-  if (merge_input.eof)
+  console.log("_maybe_start_merge_input_read: " + JSON.stringify(merge_input.toJSON()) + "; " + JSON.stringify(merge_input.input_file.toJSON()));
+  if (merge_input.eof) {
+    console.log("   ... at eof");
     return;
-  if (merge_input.input_offset >= merge_input.file.size_bytes) {
+  }
+  if (merge_input.input_offset >= merge_input.input_file.size_bytes) {
     merge_input.eof = true;
-    _try_making_merge_output(this, merge_job);
+    console.log("   ... found to be at eof");
+    this._try_making_merge_output(merge_job);
     return;
   }
 
-  if (merge_input.peekable.length > 16)
+  if (merge_input.peekable.length > 16) {
+    console.log("   ... too many pending");
     return;
+  }
 
-  if (merge_input.input_pending)
+  if (merge_input.input_pending) {
+    console.log("   ... read pending");
     return;
+  }
 
-  var read_end = merge_input.input_offset + merge_input.buffer_available;
-  var til_end = merge_input.file.size_bytes - read_end;
+  var self = this;
+  var read_end = merge_input.input_offset + merge_input.buffer_valid_length;
+  var til_end = merge_input.input_file.size_bytes - read_end;
+  console.log("til_end=" + til_end);
   if (til_end > 0) {
     var to_read = til_end < 4096 ? til_end : 4096;
 
     // ensure merge_input.buffer is large enough
-    if (merge_input.buffer.length < merge_input.buffer_available + to_read) {
-      var new_buf = new Buffer(merge_input.buffer_available + to_read);
+    if (merge_input.buffer.length < merge_input.buffer_valid_length + to_read) {
+      var new_buf = new Buffer(merge_input.buffer_valid_length + to_read);
       merge_input.buffer.copy(new_buf);
       merge_input.buffer = new_buf;
     }
 
     merge_input.input_pending = true;
-    fs.read(merge_input.file.fd, merge_input.buffer, merge_input.buffer_available,
-            read_end, function(err, bytesRead) {
-              merge_input.buffer_available += bytesRead;
+    console.log("merge_input " + merge_input.input_file.id + "; calling read(" + merge_input.buffer_valid_length + ", ", + to_read + ", " + read_end + "); fd=" + merge_input.input_file.fd);
+    fs.read(merge_input.input_file.fd, merge_input.buffer, merge_input.buffer_valid_length,
+            to_read, read_end, function(err, bytesRead) {
+              merge_input.buffer_valid_length += bytesRead;
+              console.log("got " + bytesRead + " bytes");
 
               // parse out any lines; add JSON/length pair to 'pending'.
               var nl_index;
-              var at = 0;
+              var at = merge_input.buffer_available;
               var n_lines = 0;
-              while ((nl_index=find_newline(merge_input.buffer, at, merge_input.buffer_available)) != -1) {
+              while ((nl_index=find_newline(merge_input.buffer, at, merge_input.buffer_valid_length)) != -1) {
                 var str = merge_input.buffer.slice(at, nl_index).toString();
-                merge_input.pending.push([JSON.parse(str), nl_index + 1 - at]);
+                merge_input.peekable.push([JSON.parse(str), nl_index + 1 - at]);
                 at = nl_index + 1;
                 n_lines++;
               }
+              merge_input.buffer_available = at;
 
               merge_input.input_pending = false;
               if (n_lines === 0) {
-                this._maybe_start_merge_input_read(merge_job, merge_input);
+                self._maybe_start_merge_input_read(merge_job, merge_input);
               } else {
-                _try_making_merge_output(this, merge_job);
+                self._try_making_merge_output(merge_job);
               }
             });
   }
@@ -523,38 +643,41 @@ exports.JsonLookupTableSimple.prototype._maybe_start_merge_input_read = function
 
 exports.JsonLookupTableSimple.prototype._try_making_merge_output = function(merge_job)
 {
+  if (merge_job.finished)
+    return;
+  console.log("try_making_merge_output newer.peekable=" + merge_job.newer.peekable.length + ",eof=" + merge_job.newer.eof + ";  older.peekable=" + merge_job.older.peekable.length + ",eof=" + merge_job.older.eof);
   if (merge_job.newer.eof && merge_job.older.eof) {
     this._finish_merge_job(merge_job);
     return;
   } else {
     var ready = true;
     if (merge_job.newer.peekable.length === 0 && !merge_job.newer.eof) {
-      this._maybe_start_merge_input_read(merge_job, newer);
+      this._maybe_start_merge_input_read(merge_job, merge_job.newer);
       ready = false;
     }
     if (merge_job.older.peekable.length === 0 && !merge_job.older.eof) {
-      this._maybe_start_merge_input_read(merge_job, older);
+      this._maybe_start_merge_input_read(merge_job, merge_job.older);
       ready = false;
     }
     var outputs = [];
     var ni = 0, oi = 0;
     while (ni < merge_job.newer.peekable.length && oi < merge_job.older.peekable.length) {
-      var cmp = this.compare(merge_job.newer.pending[ni][0], merge_job.older.pending[oi][0]);
+      var cmp = this.compare(merge_job.newer.peekable[ni][0], merge_job.older.peekable[oi][0]);
       if (cmp < 0) {
-        outputs.push(merge_job.newer.pending[ni++]);
+        outputs.push(merge_job.newer.peekable[ni++]);
       } else if (cmp > 0) {
-        outputs.push(merge_job.older.pending[oi++]);
+        outputs.push(merge_job.older.peekable[oi++]);
       } else {
-        var o = merge_job.older.pending[oi++];
-        var n = merge_job.older.pending[ni++];
+        var o = merge_job.older.peekable[oi++];
+        var n = merge_job.older.peekable[ni++];
         outputs.push(this.merge(o,n));
       }
     }
     while (ni < merge_job.newer.peekable.length && merge_job.older.eof) {
-      outputs.push(merge_job.newer.pending[ni++]);
+      outputs.push(merge_job.newer.peekable[ni++]);
     }
     while (oi < merge_job.older.peekable.length && merge_job.newer.eof) {
-      outputs.push(merge_job.older.pending[oi++]);
+      outputs.push(merge_job.older.peekable[oi++]);
     }
 
     if (oi > 0) {
@@ -563,6 +686,8 @@ exports.JsonLookupTableSimple.prototype._try_making_merge_output = function(merg
     if (ni > 0) {
       merge_job.newer.remove_first(ni);
     }
+
+    console.log("generated " + outputs.length + " outputs from " + oi + " and " + ni + "input entries");
       
     if (outputs.length > 0) {
       var output_buffers = [];
@@ -573,56 +698,77 @@ exports.JsonLookupTableSimple.prototype._try_making_merge_output = function(merg
       }
       var total_output = Buffer.concat(output_buffers);
       write_sync_n(merge_job.output_file.fd, total_output, merge_job.output_offset);
+      merge_job.last_output = outputs[outputs.length - 1];
       merge_job.output_offset += total_output.length;
       merge_job.output_file.size_bytes += total_output.length;
       merge_job.output_file.size_entries += outputs.length;
+
+      if (!merge_job.newer.eof && merge_job.newer.peekable.length === 0) {
+        this._maybe_start_merge_input_read(merge_job, merge_job.newer);
+      }
+      if (!merge_job.older.eof && merge_job.older.peekable.length === 0) {
+        this._maybe_start_merge_input_read(merge_job, merge_job.older);
+      }
+      if (merge_job.newer.eof && merge_job.older.eof) {
+        this._finish_merge_job(merge_job);
+      }
     }
   }
 };
 
 exports.JsonLookupTableSimple.prototype._finish_merge_job = function(merge_job)
 {
+  if (merge_job.finished)
+    return;
+  merge_job.finished = true;
+  console.log("finish-merge-job between " + merge_job.older.input_file.id + " and " + merge_job.newer.input_file.id);
   var output_file = merge_job.output_file;
 
   //TODO convert fd to read-only
 
   // replace the two input files with the single new output File
-  output_file.older = merge_job.older.file.older;
+  output_file.older = merge_job.older.input_file.older;
   if (output_file.older)
     output_file.older.newer = output_file;
   else
     this.oldest_file = output_file;
-  output_file.newer = merge_job.newer.file.newer;
+  output_file.newer = merge_job.newer.input_file.newer;
   if (output_file.newer)
     output_file.newer.older = output_file;
   else
     this.newest_file = output_file;
 
   // Delete these objects if ready.
-  merge_job.older.reduce_ref_count();
-  merge_job.newer.reduce_ref_count();
+  merge_job.older.input_file.unref();
+  merge_job.newer.input_file.unref();
 };
 
-exports.JsonLookupTableSimple.prototype._create_file_from_level0_info = function(info, callback)
+
+exports.JsonLookupTableSimple._file_id_to_filename = function(file_id)
 {
-  var filename = this._file_id_to_filename(info.file_id);
-  fs.writeFile(filename,
-               info.data,
-               function(err) {
-                 if (err) {
-                   callback(err);
-                 } else {
-                   var file = new _JsonLookupTableSimple_File();
-                   file.id = info.file_id;
-                   fs.open(filename, "r", function(err, fd) {
-                     callback(err);
-                     if (!err)
-                       file.fd = fd;
-                   });
-                 }
-               });
-};
+  return this.dir + "/F." + file_id;
+}
 
+//exports.JsonLookupTableSimple.prototype._create_file_from_level0_info = function(info, callback)
+//{
+//  var filename = this._file_id_to_filename(info.file_id);
+//  fs.writeFile(filename,
+//               info.data,
+//               function(err) {
+//                 if (err) {
+//                   callback(err);
+//                 } else {
+//                   var file = new _JsonLookupTableSimple_File();
+//                   file.id = info.file_id;
+//                   fs.open(filename, "r", function(err, fd) {
+//                     callback(err);
+//                     if (!err)
+//                       file.fd = fd;
+//                   });
+//                 }
+//               });
+//};
+//
 exports.JsonLookupTableSimple.prototype._sorted_json_to_binary = function(array)
 {
   var buffers = [];
@@ -739,6 +885,7 @@ exports.JsonLookupTableSimple.prototype.get = function(curried_comparator, callb
 	  }
 	}
       }
+      console.log("JsonLookupTableSimple.get: returning " + JSON.stringify(rv));
       callback(null, rv);
     }
   }

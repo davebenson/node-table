@@ -1,4 +1,5 @@
 var readline = require("readline");
+var assert = require("assert");
 
 var rl = readline.createInterface({
   input: process.stdin,
@@ -43,6 +44,11 @@ function do_prompt()
             console.log("= OK");
           do_prompt();
         });
+        break;
+      case 'help':
+        console.log("commands:");
+        console.log("  get KEY");
+        console.log("  add OBJECT");
         break;
       default:
         console.log("unknown command '" + cmd + "'");
