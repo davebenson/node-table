@@ -6,8 +6,10 @@ var db = JsonDatabaseClient.create_client({
   port: 91949
 });
 
-setTimeout(add_one, 1000);
-add_one();
+var n_threads = 3;
+
+for (var th = 0; th < n_threads; th++)
+  add_one(th);
 
 function random_string()
 {
@@ -16,13 +18,15 @@ function random_string()
     rv += String.fromCharCode(Math.floor(65 + Math.random() * 26));
   return rv;
 }
-function add_one()
+function add_one(thread_no)
 {
-  console.log("add_one");
+  console.log("[" + thread_no + "]: request");
   db.add({id:random_string(), value:Math.random()},
    function(err) {
+     console.log("[" + thread_no + "]: " + (err ? "failed" : "done"));
      if (err)
        console.log("failed: " + err);
-     add_one();
+     //setTimeout(add_one, 10, thread_no);
+     add_one(thread_no);
    });
 }

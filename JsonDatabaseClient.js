@@ -1,6 +1,8 @@
 var net = require("net");
 var fs = require("fs");
 var assert = require("assert");
+var events = require("events");
+var util = require("util");
 var JsonDatabaseProtocol = require("./JsonDatabaseProtocol");
 
 function Request(request_id, callback)
@@ -34,8 +36,11 @@ function JsonDatabaseClient(options)
   this.pending_requests_by_request_id = {};
   this.next_request_id = 1;
 
+  this.pending_buffers = [];
+
   this._do_connect();
 }
+util.inherits(JsonDatabaseClient, events.EventEmitter);
 
 JsonDatabaseClient.prototype._do_connect = function()
 {
@@ -44,21 +49,16 @@ JsonDatabaseClient.prototype._do_connect = function()
   this.socket = socket;
   this.socket.on("data", function(data) {
     assert(Buffer.isBuffer(data));
-    console.log("got data (" + data.length + " bytes)");
     if (self.socket !== socket)
       return;
-    console.log("data=" + data);
     self.aob.push(data);
     self.incoming_size += data.length;
 
     while (self.incoming_size >= 12) {
       // compute payload length
-      console.log("first buffer length=" + (self.aob[0].length - self.first_buffer_offset ));
       if (self.aob[0].length - self.first_buffer_offset < 12)
         self._consolidate_incoming_buffers();
       var payload_length = self.aob[0].readUInt32LE(self.first_buffer_offset + 8);
-      console.log("payload_length=" + payload_length);
-      console.log(self.aob[0].slice(self.first_buffer_offset,self.first_buffer_offset+12).toString("hex"));
 
       if (self.incoming_size < 12 + payload_length)
         break;
@@ -84,6 +84,10 @@ JsonDatabaseClient.prototype._do_connect = function()
     if (self.state !== 'CONNECTING')
       console.log("bad state: 'connect' which not 'CONNECTING'");
     self.state = 'CONNECTED';
+    self.emit("connected");
+    var outgoing = Buffer.concat(self.pending_buffers);
+    self.pending_buffers = [];
+    self.socket.write(outgoing);
   }).on("error", function(err) {
     console.log("kudo-db-client: error " + err);
   }).on("close", function() {
@@ -92,6 +96,13 @@ JsonDatabaseClient.prototype._do_connect = function()
       return;
     // try reconnect?
     self.state = 'DISCONNECTED';
+    self.emit("disconnected");
+    var e = new Error("server disconnected");
+    for (var req_id in self.pending_requests_by_request_id) {
+      var req = self.pending_requests_by_request_id[req_id];
+      req.callback(e, null);
+    }
+    self.pending_requests_by_request_id = {};
     assert(self.reconnect_timer === null);
     self.reconnect_timer = setTimeout(function() {
       self.reconnect_timer = null;
@@ -106,7 +117,7 @@ JsonDatabaseClient.prototype._do_connect = function()
     if (request)
       delete self.pending_requests_by_request_id[request_id];
     console.log("> GOT " + JsonDatabaseProtocol.code_to_name[response_type] +
-              " [payload size=" + payload.length + "]");
+              " [payload size=" + payload.length + ", request_id=" + request_id + "]");
     switch (response_type) {
       case JsonDatabaseProtocol.LOGGED_IN:
         console.log("logged in");
@@ -137,8 +148,6 @@ JsonDatabaseClient.prototype._do_connect = function()
         break;
       case JsonDatabaseProtocol.ERROR_RESPONSE:
         if (!request) {
-          console.log("request=" + request_id + "; msglen=" + payload.length);
-          console.log("msg=" + payload.toString());
           self.notify_error("ERROR response with no matching request_id");
         } else {
           var txt = "remote error: " + payload.toString();
@@ -158,14 +167,18 @@ JsonDatabaseClient.prototype._do_connect = function()
   }
 };
 JsonDatabaseClient.prototype.send_message = function(response_type, request_id, payload) {
-  console.log("> SEND " + JsonDatabaseProtocol.code_to_name[response_type]);
   payload = normalize_payload(payload);
   var header = new Buffer(12);
   header.writeUInt32LE(response_type, 0);
   header.writeUInt32LE(request_id, 4);
   header.writeUInt32LE(payload.length, 8);
   var packet = Buffer.concat([header, payload]);
-  this.socket.write(packet);
+  console.log("writign request " + request_id);
+  if (this.state === 'CONNECTED') {
+    this.socket.write(packet);
+  } else {
+    this.pending_buffers.push(packet);
+  }
 };
 
 JsonDatabaseClient.prototype._consolidate_incoming_buffers = function() {
@@ -200,8 +213,8 @@ JsonDatabaseClient.prototype.add = function(object, callback)
   var request_id = this._allocate_request_id();
   var req = new Request(request_id, callback);
   this.pending_requests_by_request_id[request_id] = req;
-  console.log("sending update message");
   this.send_message(JsonDatabaseProtocol.UPDATE_REQUEST, request_id, object);
+  console.log("add: request_id=" + request_id);
 };
 
 exports.create_client = function(options) {

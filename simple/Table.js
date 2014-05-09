@@ -4,6 +4,7 @@ var fs_ext = require("fs-ext");
 var fs = require("fs");
 var assert = require("assert");
 var util = require("util");
+var common = require("./common");
 
 var SortMergeInMemory = require("./SortMergeInMemory");
 var File = require("./File");
@@ -21,6 +22,9 @@ Table = function(options) {
   this.journal_write_pending = false;
   this.journal_write_pending_buffers = [];
   this.journal_write_pending_callbacks = [];
+
+  this.journal_flush_after_write = false;
+
   this.journal_start_input_entry = 0;
   this.journal_num_entries = 0;
   this.journal_max_entries = options.journal_max_entries || DEFAULT_JOURNAL_MAX_ENTRIES;
@@ -111,7 +115,7 @@ Table = function(options) {
     last_f = f;
     f.filename = this.dir + "/F." + f.id;
 
-    f.fd = fs.openSync(f.filename, "r");
+    f.fd = fs.openSync(f.filename, "r+");
     console.log("open file " + f.id + " on fd " + f.fd);
 
     cp_files.push(f);
@@ -123,10 +127,9 @@ Table = function(options) {
     var mj = cp_json.merge_jobs[i];
     for (var f = this.newest_file; f !== null; f = f.older) {
       if (mj.newer.input_id === f.id) {
-        assert(f.older.id === mj.older_input_id);
-        var merge_job = new MergeJob();
-        console.log("creating mergejob from cp: " + mj.older.input_file.id + " and " + mj.newer.input_file.id);
-        merge_job.output_file.id = mj.output_file.id;
+        assert.equal(f.older.id, mj.older.input_id);
+        var merge_job = this._create_merge_job(f.older, {});
+        merge_job.output_file.id = mj.output_id;
         merge_job.older.input_offset = mj.older.input_offset;
         merge_job.newer.input_offset = mj.newer.input_offset;
         merge_job.output_offset = mj.output_offset;
@@ -136,13 +139,15 @@ Table = function(options) {
         merge_job.output_file.fd = fs.openSync(merge_job.output_file.filename, "r+");
         merge_job.output_file.start_input_entry = merge_job.older.input_file.start_input_entry;
         merge_job.output_file.n_input_entries = merge_job.older.input_file.n_input_entries + merge_job.newer.input_file.n_input_entries;
-        console.log("merge_job: open file " + merge_job.output_file.id + " on fd " + merge_job.output_file.fd);
         merge_job.newer.input_file = f;
         merge_job.older.input_file = f.older;
         fs.ftruncateSync(merge_job.output_file.fd, merge_job.output_offset);
-        f.merge_job = n.older.merge_job = merge_job;
+        f.merge_job = f.older.merge_job = merge_job;
+        cp_files.push(merge_job.output_file);
+        merge_job.output_file.ref();
 
-        this._start_merge_job(merge_job);
+        //this._start_merge_job(merge_job);
+        merge_job.start();
 
         break;
       }
@@ -167,17 +172,6 @@ Table = function(options) {
   this.last_journal_files = cp_files;
 };
 
-function write_sync_n(fd, data, position)
-{
-  var at = 0, rem = data.length, pos = position;
-  while (rem > 0) {
-    var n = fs.writeSync(fd, data, at, rem, pos);
-    at += n;
-    rem -= n;
-    pos += n;
-  }
-}
-
 Table.prototype.add = function(doc, callback)
 {
   var self = this;
@@ -192,7 +186,11 @@ Table.prototype.add = function(doc, callback)
   }
 
   if (this.journal_num_entries + cur_docs.length > this.journal_max_entries) {
-    this._flush_journal();
+    if (this.journal_write_pending) {
+      this.journal_flush_after_write = true;
+    } else {
+      this._flush_journal();
+    }
   }
   for (var i = 0; i < cur_docs.length; i++)
     this.sort_merger.add(cur_docs[i]);
@@ -207,9 +205,11 @@ Table.prototype.add = function(doc, callback)
   var buf = new Buffer(JSON.stringify(doc) + "\n");
   ++pending_requests;
   if (this.journal_write_pending) {
+    console.log("journal write pending");
     this.journal_write_pending_buffers.push(buf);
     this.journal_write_pending_callbacks.push(decr_pending_requests);
   } else {
+    console.log("doing journal write");
     this.journal_write_pending = true;
     var this_err = null;
     if (this.journal_fd === -1) {
@@ -218,6 +218,7 @@ Table.prototype.add = function(doc, callback)
     }
     writen_buffer(this.journal_fd, buf, 0, buf.length, this.journal_offset, function(err) {
       if (err) {
+        console.log("failed writing to journal " + self.journal_fd);
         var bufs = self.journal_write_pending_buffers;
         var cbs = self.journal_write_pending_callbacks;
         self.journal_write_pending_buffers = [];
@@ -227,16 +228,21 @@ Table.prototype.add = function(doc, callback)
         this_err = err;
         decr_pending_requests();
       } else if (self.journal_write_pending_buffers.length > 0) {
+        console.log("done writing journal... but " + self.journal_write_pending_buffers.length + " new buffers exist");
         self.journal_offset += buf.length;
-        console.log("flushing pending write buffers (" + self.journal_write_pending_buffers.length + ")");
         self._flush_pending_journal_write_buffers(function(err) {
           if (err)
 	    console.log("_flush_pending_journal_write_buffers failed: " + err);
           decr_pending_requests();
         });
       } else {
+        console.log("done writing journal");
         self.journal_offset += buf.length;
         self.journal_write_pending = false;
+        if (self.journal_flush_after_write) {
+          self.journal_flush_after_write = false;
+          self._flush_journal();
+        }
         decr_pending_requests();
       }
     });
@@ -260,25 +266,19 @@ Table.prototype._flush_journal = function()
 {
   this._check_invariants("flush_journal");
 
+  fs.closeSync(this.journal_fd);
+
   var file_id = this._allocate_file_id();
   //this.pending_writing_level0_files.push(pending_level0_info);
   var level0_docs = this.sort_merger.get_list();
   var level0_data = this._sorted_json_to_binary(level0_docs);
-  console.log("writing level0 data to " + file_id);
   fs.writeFileSync(this.dir + "/F." + file_id, level0_data);
   this.journal_fd = fs.openSync(this.dir + "/JOURNAL.tmp", "w");
-
-  var cp_files = [];
-  for (var file = this.newest_file; file !== null; file = file.older) {
-    cp_files.push(file);
-    file.ref();
-  }
 
   var f = new File();
   f.id = file_id;
   f.filename = this.dir + "/F." + file_id;
   f.fd = fs.openSync(f.filename, "r");
-  console.log("level0 file " + f.id + " on fd " + f.fd + "[filename " + f.filename + "]");
   f.size_bytes = level0_data.length;
   f.size_entries = level0_docs.length;
   f.start_input_entry = this.journal_start_input_entry;
@@ -293,9 +293,20 @@ Table.prototype._flush_journal = function()
   this._maybe_start_merge_jobs();
   this.journal_num_entries = 0;
 
+  var cp_files = [];
+  for (var file = this.newest_file; file !== null; file = file.older) {
+    cp_files.push(file);
+    file.ref();
+    if (file.merge_job && file.merge_job.newer.input_file === file) {
+      var out = file.merge_job.output_file;
+      cp_files.push(out);
+      out.ref();
+    }
+  }
+
   var cp_json = this._create_checkpoint_json();
   var cp_data = new Buffer(JSON.stringify(cp_json) + "\n");
-  write_sync_n(this.journal_fd, cp_data, 0);
+  common.write_sync_n(this.journal_fd, cp_data, 0);
   fs.renameSync(this.dir + "/JOURNAL.tmp", this.dir + "/JOURNAL");
   this.journal_offset = cp_data.length;
 
@@ -337,197 +348,61 @@ function(callback) {
       }
       if (!err)
         self.journal_offset += buf.length;
-      if (!err && self.journal_write_pending_buffers.ength > 0) {
+      if (!err && self.journal_write_pending_buffers.length > 0) {
+        console.log("done w/ write, but more buffer meanwhile");
         self._flush_pending_journal_write_buffers(callback);
       } else {
-        this.journal_write_pending = false;
+        console.log("done w/ write; err=" + err);
+        self.journal_write_pending = false;
+        if (self.journal_flush_after_write) {
+          self.journal_flush_after_write = false;
+          self._flush_journal();
+        }
         callback(err);
       }
     }
   );
 };
 
+Table.prototype._create_merge_job = function(older_file, options) {
+  var self = this;
+  var merge_job = new MergeJob();
+  merge_job.compare = this.compare;
+  merge_job.merge = this.merge;
+  merge_job.older.input_file = older_file;
+  merge_job.newer.input_file = older_file.newer;
+  older_file.merge_job = merge_job;
+  older_file.newer.merge_job = merge_job;
+  merge_job.on("finished", function() {
+    self.merge_job_finished(this);
+  });
+  return merge_job;
+};
+
 Table.prototype._maybe_start_merge_jobs = function() {
+  var self = this;
   for (var f = this.newest_file; f !== null; f = f.older) {
     if (f.merge_job === null &&
         f.older !== null &&
         f.older.merge_job === null &&
         f.size_bytes > f.older.size_bytes * 0.35)
     {
-      var merge_job = new MergeJob();
-      merge_job.newer.input_file = f;
-      merge_job.older.input_file = f.older;
-      f.merge_job = f.older.merge_job = merge_job;
+      var merge_job = this._create_merge_job(f.older, {});
 
       merge_job.output_file.id = this._allocate_file_id();
-      console.log("creating merge job between " + f.older.id + " and " + f.id + " (=> " + merge_job.output_file.id + ")");
       merge_job.output_file.filename = this.dir + "/F." + merge_job.output_file.id;
       merge_job.output_file.fd = fs.openSync(merge_job.output_file.filename, "w+");
       merge_job.output_file.start_input_entry = merge_job.older.input_file.start_input_entry;
       merge_job.output_file.n_input_entries = merge_job.older.input_file.n_input_entries + merge_job.newer.input_file.n_input_entries;
 
-      this._start_merge_job(merge_job);
+
+      merge_job.start();
     }
   }
 };
 
-Table.prototype._start_merge_job = function(merge_job)
+Table.prototype.merge_job_finished = function(merge_job)
 {
-  console.log("_start_merge_job");
-  this._maybe_start_merge_input_read(merge_job, merge_job.newer);
-  this._maybe_start_merge_input_read(merge_job, merge_job.older);
-};
-
-function find_newline(buffer, start, end)
-{
-  for (var i = start; i < end; i++)
-    if (buffer[i] === 0x0a)
-      return i;
-  return -1;
-}
-
-Table.prototype._maybe_start_merge_input_read = function(merge_job, merge_input)
-{
-  if (merge_input.eof) {
-    return;
-  }
-  if (merge_input.input_offset >= merge_input.input_file.size_bytes) {
-    merge_input.eof = true;
-    this._try_making_merge_output(merge_job);
-    return;
-  }
-
-  if (merge_input.peekable.length > 16) {
-    return;
-  }
-
-  if (merge_input.input_pending) {
-    return;
-  }
-
-  var self = this;
-  var read_end = merge_input.input_offset + merge_input.buffer_valid_length;
-  var til_end = merge_input.input_file.size_bytes - read_end;
-  if (til_end > 0) {
-    var to_read = til_end < 4096 ? til_end : 4096;
-
-    // ensure merge_input.buffer is large enough
-    if (merge_input.buffer.length < merge_input.buffer_valid_length + to_read) {
-      var new_buf = new Buffer(merge_input.buffer_valid_length + to_read);
-      merge_input.buffer.copy(new_buf);
-      merge_input.buffer = new_buf;
-    }
-
-    merge_input.input_pending = true;
-    //console.log("merge_input " + merge_input.input_file.id + "; calling read(" + merge_input.buffer_valid_length + ", ", + to_read + ", " + read_end + "); fd=" + merge_input.input_file.fd);
-    fs.read(merge_input.input_file.fd, merge_input.buffer, merge_input.buffer_valid_length,
-            to_read, read_end, function(err, bytesRead) {
-              merge_input.buffer_valid_length += bytesRead;
-              console.log("got " + bytesRead + " bytes");
-
-              // parse out any lines; add JSON/length pair to 'pending'.
-              var nl_index;
-              var at = merge_input.buffer_available;
-              var n_lines = 0;
-              while ((nl_index=find_newline(merge_input.buffer, at, merge_input.buffer_valid_length)) != -1) {
-                var str = merge_input.buffer.slice(at, nl_index).toString();
-                merge_input.peekable.push([JSON.parse(str), nl_index + 1 - at]);
-                at = nl_index + 1;
-                n_lines++;
-              }
-              merge_input.buffer_available = at;
-
-              merge_input.input_pending = false;
-              if (n_lines === 0) {
-                self._maybe_start_merge_input_read(merge_job, merge_input);
-              } else {
-                self._try_making_merge_output(merge_job);
-              }
-            });
-  }
-};
-
-Table.prototype._try_making_merge_output = function(merge_job)
-{
-  if (merge_job.finished)
-    return;
-  //console.log("try_making_merge_output newer.peekable=" + merge_job.newer.peekable.length + ",eof=" + merge_job.newer.eof + ";  older.peekable=" + merge_job.older.peekable.length + ",eof=" + merge_job.older.eof);
-  if (merge_job.newer.eof && merge_job.older.eof) {
-    this._finish_merge_job(merge_job);
-    return;
-  } else {
-    var ready = true;
-    if (merge_job.newer.peekable.length === 0 && !merge_job.newer.eof) {
-      this._maybe_start_merge_input_read(merge_job, merge_job.newer);
-      ready = false;
-    }
-    if (merge_job.older.peekable.length === 0 && !merge_job.older.eof) {
-      this._maybe_start_merge_input_read(merge_job, merge_job.older);
-      ready = false;
-    }
-    var outputs = [];
-    var ni = 0, oi = 0;
-    while (ni < merge_job.newer.peekable.length && oi < merge_job.older.peekable.length) {
-      var cmp = this.compare(merge_job.newer.peekable[ni][0], merge_job.older.peekable[oi][0]);
-      if (cmp < 0) {
-        outputs.push(merge_job.newer.peekable[ni++][0]);
-      } else if (cmp > 0) {
-        outputs.push(merge_job.older.peekable[oi++][0]);
-      } else {
-        var o = merge_job.older.peekable[oi++][0];
-        var n = merge_job.older.peekable[ni++][0];
-        outputs.push(this.merge(o,n));
-      }
-    }
-    while (ni < merge_job.newer.peekable.length && merge_job.older.eof) {
-      outputs.push(merge_job.newer.peekable[ni++][0]);
-    }
-    while (oi < merge_job.older.peekable.length && merge_job.newer.eof) {
-      outputs.push(merge_job.older.peekable[oi++][0]);
-    }
-
-    if (oi > 0) {
-      merge_job.older.remove_first(oi);
-    }
-    if (ni > 0) {
-      merge_job.newer.remove_first(ni);
-    }
-
-    console.log("generated " + outputs.length + " outputs from " + oi + " and " + ni + "input entries");
-      
-    if (outputs.length > 0) {
-      var output_buffers = [];
-      for (var i = 0; i < outputs.length; i++) {
-        var b = new Buffer(JSON.stringify(outputs[i]));
-        output_buffers.push(b);
-        output_buffers.push(newline_buffer);
-      }
-      var total_output = Buffer.concat(output_buffers);
-      write_sync_n(merge_job.output_file.fd, total_output, merge_job.output_offset);
-      merge_job.last_output = outputs[outputs.length - 1];
-      merge_job.output_offset += total_output.length;
-      merge_job.output_file.size_bytes += total_output.length;
-      merge_job.output_file.size_entries += outputs.length;
-
-      if (!merge_job.newer.eof && merge_job.newer.peekable.length === 0) {
-        this._maybe_start_merge_input_read(merge_job, merge_job.newer);
-      }
-      if (!merge_job.older.eof && merge_job.older.peekable.length === 0) {
-        this._maybe_start_merge_input_read(merge_job, merge_job.older);
-      }
-      if (merge_job.newer.eof && merge_job.older.eof) {
-        this._finish_merge_job(merge_job);
-      }
-    }
-  }
-};
-
-Table.prototype._finish_merge_job = function(merge_job)
-{
-  if (merge_job.finished)
-    return;
-  merge_job.finished = true;
-  console.log("finish-merge-job between " + merge_job.older.input_file.id + " and " + merge_job.newer.input_file.id);
   var output_file = merge_job.output_file;
 
   //TODO convert fd to read-only
@@ -557,26 +432,6 @@ Table._file_id_to_filename = function(file_id)
   return this.dir + "/F." + file_id;
 }
 
-//exports.JsonLookupTableSimple.prototype._create_file_from_level0_info = function(info, callback)
-//{
-//  var filename = this._file_id_to_filename(info.file_id);
-//  fs.writeFile(filename,
-//               info.data,
-//               function(err) {
-//                 if (err) {
-//                   callback(err);
-//                 } else {
-//                   var file = new File();
-//                   file.id = info.file_id;
-//                   fs.open(filename, "r", function(err, fd) {
-//                     callback(err);
-//                     if (!err)
-//                       file.fd = fd;
-//                   });
-//                 }
-//               });
-//};
-//
 Table.prototype._sorted_json_to_binary = function(array)
 {
   var buffers = [];
@@ -650,7 +505,7 @@ Table.prototype.get = function(curried_comparator, callback)
 	  file_results.push(null);
 	  (function(merge_job, result_index) {
 	    ++pending;
-	    self._do_search_file(merge_job.output_file, curried_comparator, function(err, res) {
+	    merge_job.output_file.do_search_file(curried_comparator, function(err, res) {
 	      file_results[result_index] = res;
 	      if (err && first_err === null)
 	        first_err = err;
@@ -672,7 +527,7 @@ Table.prototype.get = function(curried_comparator, callback)
     // launch scan of file
     (function(result_index) {
       ++pending;
-      self._do_search_file(file, curried_comparator, function(err, res) {
+      file.do_search_file(curried_comparator, function(err, res) {
 	file_results[result_index] = res;
 	if (err && first_err === null)
 	  first_err = err;
@@ -697,24 +552,11 @@ Table.prototype.get = function(curried_comparator, callback)
 	  }
 	}
       }
-      console.log("JsonLookupTableSimple.get: returning " + JSON.stringify(rv));
       callback(null, rv);
     }
   }
 };
 
-function readn_buffer(fd, buffer, offset, length, position, callback)
-{
-  if (length === 0)
-    callback(null);
-  else
-    fs.read(file.fd, buffer, offset, length, start, function(err, bytesRead) {
-      if (err)
-        callback(err);
-      else
-        readn_buffer(fd, buffer, offset + bytesRead, length - bytesRead, position + bytesRead, callback);
-    });
-}
 function writen_buffer(fd, buffer, offset, length, position, callback)
 {
   if (length === 0)
@@ -727,114 +569,6 @@ function writen_buffer(fd, buffer, offset, length, position, callback)
         writen_buffer(fd, buffer, offset + written, length - written, position + written, callback);
     });
 }
-
-Table.prototype._do_search_file = function(file, curried_comparator, callback) {
-  var self = this;
-  do_search_range(0, file.size_bytes);
-
-  function do_search_range(start, length) {
-    if (length === 0) {
-      callback(null, null);
-    } else if (length <= 4096) {
-      var buf = new Buffer(length);
-      readn_buffer(file.fd, buf, 0, length, start, function(err) {
-        if (err) {
-          callback(err);
-        } else {
-          // split buffer into lines
-          var strs = buf.slice(0,buf.length - 1).toString().split("\n");
-
-          console.log("doing binary search of " + strs.length + " entries from " + file.id);
-
-          // binary search JSON array
-          var obj_start = 0;
-          var obj_length = strs.length;
-          while (obj_length > 0) {
-            var obj_mid = obj_start + Math.floor(obj_length / 2);
-            var obj = JSON.parse(strs[obj_mid]);
-            var cmp = curried_comparator(obj);
-            if (cmp < 0) {
-              obj_length = obj_mid - obj_start;
-            } else if (cmp > 0) {
-              obj_length = obj_start + obj_length - (obj_mid + 1);
-              obj_start = obj_mid + 1;
-            } else {
-              callback(null, obj);
-            }
-          }
-          callback(null, null);
-        }
-      });
-    } else {
-      // read 4096 bytes from middle of search area
-      var buf = new Buffer(4096);
-      var buf_position = start + Math.floor((length - 4096) / 2);
-      readn_buffer(file.fd, buf, 0, 4096, buf_position, function(err) {
-        if (err) {
-          callback(err);
-        } else {
-          try_handle_buf();
-        }
-      });
-      function try_handle_buf() {
-        var line_range = find_line_range(buf, buf_position === start);
-        if (!line_range) {
-          // expand buffer left and right
-          var expand_left = buf_position - start;
-          if (expand_left > 4096)
-            expand_left = 4096;
-          var expand_right = (buf_position + buf.length) - (start + length);
-          if (expand_right > 4096)
-            expand_right = 4096;
-          var pending = 1;
-          var first_err = null;
-          var b = new Buffer(buf.length + expand_left + expand_right);
-          buf.copy(b, expand_left, 0, buf.size);
-          buf = b;
-          buf_position -= expand_left;
-          if (expand_left > 0) {
-            pending++;
-            readn_buffer(file.fd, buf, 0, expand_left, buf_position, function(err) {
-              if (err && !first_err)
-                first_err = err;
-              decr_pending();
-            });
-          }
-          if (expand_right > 0) {
-            pending++;
-            readn_buffer(file.fd, buf, buf.length - expand_right, expand_right,
-                         buf_position + buf.length - expand_right, function(err) {
-              if (err && !first_err)
-                first_err = err;
-              decr_pending();
-            });
-          }
-          decr_pending();
-          function decr_pending() {
-            if (--pending === 0) {
-              if (first_err) {
-                callback(first_err);
-              } else {
-                try_handle_buf();
-              }
-            }
-          }
-        } else {
-          var obj = JSON.parse(buf.slice(line_range[0], line_range[1]).toString());
-          var cmp = curried_comparator(obj);
-          if (cmp < 0) {
-            do_search_range(start, buf_position + line_range[0] - start);
-          } else if (cmp > 0) {
-            var s = buf_position + line_range[1];
-            do_search_range(s, start + length - s);
-          } else {
-            callback(null, obj);
-          }
-        }
-      }
-    }
-  }
-};
 
 Table.prototype._close = function(deleteFiles) {
   // Delete files + merge-jobs
@@ -868,7 +602,7 @@ Table.prototype._check_invariants = function(loc)
 {
   var last = null;
   var at_input_entry = 0;
-  console.log("_check_invariants: location=" + loc);
+  //console.log("_check_invariants: location=" + loc);
   for (var file = this.oldest_file; file !== null; file = file.newer) {
     assert (file.older === last);
     assert(file.start_input_entry === at_input_entry);

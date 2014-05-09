@@ -37,7 +37,7 @@ function handle_socket(socket, server, db)
       }
 
 
-      var payload_len = aob[0].readUInt32LE(8);
+      var payload_len = aob[0].readUInt32LE(first_buffer_used + 8);
       if (aob_total < 12 + payload_len) {
         break;
       }
@@ -47,11 +47,17 @@ function handle_socket(socket, server, db)
         first_buffer_used = 0;
         aob = [Buffer.concat(aob)];
       }
-      handle_input_command(aob[0].readUInt32LE(0),
-                           aob[0].readUInt32LE(4),
-                           aob[0].slice(12, 12+payload_len));
+      console.log("handling input command with first_buffer_used=" + first_buffer_used);
+      handle_input_command(aob[0].readUInt32LE(first_buffer_used + 0),
+                           aob[0].readUInt32LE(first_buffer_used + 4),
+                           aob[0].slice(first_buffer_used + 12, first_buffer_used + 12+payload_len));
       first_buffer_used += 12 + payload_len;
       aob_total -= 12 + payload_len;
+
+      if (first_buffer_used === aob[0].length) {
+        first_buffer_used = 0;
+        aob.splice(0,1);
+      }
     }
   }).on("close", function() {
     // untrap all!
@@ -83,11 +89,16 @@ function handle_socket(socket, server, db)
         try {
           doc = JSON.parse(payload.toString());
         } catch (e) {
+          console.log("update request had bad json: '" + payload + "': " + e);
           send_error_response(request_id, e.toString());
           return;
         }
+
+        console.log("got UPDATE request [" + request_id + "]");
           
         db.add(doc, function(err) {
+          console.log("sending UPDATE response [" + request_id + "]");
+          
           if (err) {
             send_error_response(request_id, err.toString());
           } else {
