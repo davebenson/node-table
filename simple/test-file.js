@@ -15,12 +15,14 @@ function make_curried_comparator(key)
   };
 }
 
+var test_filename_seqno = 1;
+
 function run_test(options, done_callback)
 {
   var keys = options.keys;
   var key_to_value = options.key_to_value;
   var missing_keys = options.missing_keys;
-  var filename = options.filename;
+  var filename = "tmp." + test_filename_seqno++;
   var fd = fs.openSync(filename, "w");
   var len = 0;
   for (var i = 0; i < keys.length; i++) {
@@ -43,7 +45,6 @@ function run_test(options, done_callback)
   function test_next_key() {
     var key = keys[key_index];
     key_index++;
-    console.log("doing search-file with " + key);
     file.do_search_file(make_curried_comparator(key), function(err, value) {
       assert(err === null);
       assert(value !== null);
@@ -92,13 +93,50 @@ for (var a = 0; a < 26; a++) {
 function k2v__value_equals_key(key) {
   return {key:key, value:key};
 }
+var long_value = "";
+for (var i = 0; i < 100; i++) {
+  long_value += "0123456789";
+}
+function k2v__long_value(key) {
+  return {key:key, value:long_value};
+}
 
 var tests = [
   {
+    description: "tiny test, small entries",
     keys:keys_small,
     key_to_value: k2v__value_equals_key,
     missing_keys: missing_keys,
-    filename: "tmp.1"
+  },
+  {
+    description: "medium test, small entries",
+    keys:keys_medium,
+    key_to_value: k2v__value_equals_key,
+    missing_keys: missing_keys,
+  },
+  {
+    description: "large test, small entries",
+    keys:keys_large,
+    key_to_value: k2v__value_equals_key,
+    missing_keys: missing_keys,
+  },
+  {
+    description: "tiny test, medium entries",
+    keys:keys_small,
+    key_to_value: k2v__long_value,
+    missing_keys: missing_keys,
+  },
+  {
+    description: "medium test, medium entries",
+    keys:keys_medium,
+    key_to_value: k2v__long_value,
+    missing_keys: missing_keys,
+  },
+  {
+    description: "large test, medium entries",
+    keys:keys_large,
+    key_to_value: k2v__long_value,
+    missing_keys: missing_keys,
   }
 ];
 
@@ -106,6 +144,7 @@ var test_index = 0;
 run_next_test();
 
 function run_next_test() {
+  console.log("running " + tests[test_index].description);
   run_test(tests[test_index], function() {
     test_index++;
     if (test_index === tests.length)

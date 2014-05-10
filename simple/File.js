@@ -31,7 +31,6 @@ File.prototype.ref = function() {
   ++this.ref_count;
 };
 File.prototype.unref = function() {
-  console.log("unref of file " + this.id);
   assert(this.ref_count > 0);
   if (--this.ref_count === 0) {
     var self = this;
@@ -48,7 +47,7 @@ File.prototype.unref = function() {
   }
 };
 
-function _find_line_range(buffer, pos_0_ok)
+function find_line_range(buffer, pos_0_ok)
 {
   var start = Math.floor(buffer.length / 2);
   var end = start;
@@ -104,21 +103,6 @@ function _find_line_range(buffer, pos_0_ok)
   }
 }
 
-function find_line_range(buffer, pos_0_ok)
-{
-  console.log("find_line_range");
-  var rv = _find_line_range(buffer, pos_0_ok);
-  console.log("rv=" + util.inspect(rv));
-  return rv;
-}
-
-function my_fs_read(fd, buffer, offset, length, position, cb) {
-  //console.log("my_fs_read=" + util.inspect(arguments));
-  var nread = fs.readSync(fd, buffer, offset, length, position);
-  //console.log("done read: " + nread);
-  setImmediate(cb, null, nread);
-}
-
 function readn_buffer(fd, buffer, offset, length, position, callback)
 {
   if (length === 0)
@@ -139,7 +123,7 @@ File.prototype.do_search_file = function(curried_comparator, callback) {
   do_search_range(0, self.size_bytes);
 
   function do_search_range(start, length) {
-    console.log("do_search_range: file=" + self.id + "; start=" + start +"; len=" + length);
+    //console.log("do_search_range: file=" + self.id + "; start=" + start +"; len=" + length);
     if (length === 0) {
       callback(null, null);
     } else if (length <= 4096) {
@@ -192,7 +176,7 @@ File.prototype.do_search_file = function(curried_comparator, callback) {
       });
       function try_handle_buf() {
         var line_range = find_line_range(buf, buf_position === start);
-        console.log("try_handle_buf: position=" + buf_position + "; length=" + buf.length + "; line-range=" + JSON.stringify(line_range));
+        //console.log("try_handle_buf: position=" + buf_position + "; length=" + buf.length + "; line-range=" + JSON.stringify(line_range));
         if (!line_range) {
           // expand buffer left and right
           var expand_left = buf_position - start;
