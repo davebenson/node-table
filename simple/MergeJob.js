@@ -34,6 +34,7 @@ MergeJob.prototype.toJSON = function() {
     output_id: this.output_file.id,
     output_offset: this.output_offset,
     output_n_entries: this.output_file.size_entries,
+    output_largest_entry: this.output_file.largest_entry,
     older: this.older.toJSON(),
     newer: this.newer.toJSON(),
   };
@@ -161,6 +162,8 @@ MergeJob.prototype._try_making_merge_output = function()
       var output_buffers = [];
       for (var i = 0; i < outputs.length; i++) {
         var b = new Buffer(JSON.stringify(outputs[i]));
+        if (this.output_file.largest_entry < b.length)
+          this.output_file.largest_entry = b.length;
         output_buffers.push(b);
         output_buffers.push(newline_buffer);
       }

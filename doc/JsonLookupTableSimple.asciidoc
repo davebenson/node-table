@@ -1,19 +1,31 @@
-Distributed Database
---------------------
-Our goal is to implememt a efficient distributed data store.
+Local Database
+--------------
+This is a locally-stored key-value database.  The keys and values are JSON.  We will describe the operation completely for writing data--- the query implementation is
+effectively determined by the format- see the implementation for details.
 
-Public Methods
-~~~~~~~~~~~~~~
+The database consists essentially in two parts:
 
-   update(doc, callback)
+* a append-only journal file that is mirrored by an in-memory object that allows efficient dumps and queries.
+* a sequence of sorted files that are merged together as needed to keep the amount of data to search as small as possible
+
+The Checkpoint Format
+~~~~~~~~~~~~~~~~~~~~~
+
+The Journal
+~~~~~~~~~~~
+
+The Sorted Files
+~~~~~~~~~~~~~~~~
+
+
+JsonLookupTable Public Methods
+------------------------------
+
+   add(doc, callback)
 
 ...
 
    get(doc_id, callback)
-
-...
-
-   delete(doc_id, callback)
 
 ...
 

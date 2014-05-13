@@ -106,6 +106,7 @@ Table = function(options) {
     f.n_input_entries = info.n_input_entries;
     f.size_bytes = info.size_bytes;
     f.size_entries = info.size_entries;
+    f.largest_entry = info.largest_entry;
     f.newer = last_f;
     if (last_f)
       last_f.older = f;
@@ -139,6 +140,7 @@ Table = function(options) {
         merge_job.output_file.fd = fs.openSync(merge_job.output_file.filename, "r+");
         merge_job.output_file.start_input_entry = merge_job.older.input_file.start_input_entry;
         merge_job.output_file.n_input_entries = merge_job.older.input_file.n_input_entries + merge_job.newer.input_file.n_input_entries;
+        merge_job.output_file.largest_entry = mj.output_largest_entry;
         merge_job.newer.input_file = f;
         merge_job.older.input_file = f.older;
         fs.ftruncateSync(merge_job.output_file.fd, merge_job.output_offset);
@@ -271,7 +273,8 @@ Table.prototype._flush_journal = function()
   var file_id = this._allocate_file_id();
   //this.pending_writing_level0_files.push(pending_level0_info);
   var level0_docs = this.sort_merger.get_list();
-  var level0_data = this._sorted_json_to_binary(level0_docs);
+  var largest_entry = [];
+  var level0_data = this._sorted_json_to_binary(level0_docs, largest_entry);
   fs.writeFileSync(this.dir + "/F." + file_id, level0_data);
   this.journal_fd = fs.openSync(this.dir + "/JOURNAL.tmp", "w");
 
@@ -284,6 +287,7 @@ Table.prototype._flush_journal = function()
   f.start_input_entry = this.journal_start_input_entry;
   f.n_input_entries = this.journal_num_entries;
   f.older = this.newest_file;
+  f.largest_entry = largest_entry[0];
   if (f.older)
     f.older.newer = f;
   else

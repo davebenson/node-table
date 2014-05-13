@@ -14,6 +14,7 @@ function File() {
   this.merge_job = null;
   this.ref_count = 1;
   this.filename = null;
+  this.largest_entry = 0;
 }
 File.prototype.toJSON = function() {
   assert(this.start_input_entry !== null);
@@ -24,6 +25,7 @@ File.prototype.toJSON = function() {
     n_input_entries: this.n_input_entries,
     size_bytes: this.size_bytes,
     size_entries: this.size_entries,
+    largest_entry: this.largest_entry
   };
 };
 File.prototype.ref = function() {
@@ -162,6 +164,7 @@ File.prototype.do_search_file = function(curried_comparator, callback) {
       });
     } else {
       // read 4096 bytes from middle of search area
+      // XXX: use largest_entry
       var buf = new Buffer(4096);
       var buf_position = start + Math.floor((length - 4096) / 2);
       //console.log("calling readn_buffer: position=" + buf_position + "; length=" + 4096);
