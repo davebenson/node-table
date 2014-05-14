@@ -67,12 +67,13 @@ exports.merge = function(a,b)
   return a;
 };
 
-exports.make_final_merge_function = function(default_value) {
-  return function(a) {
-    if (a._deleted)
-      return null;
-    else
-      return a;
-  };
-};
+exports.final_merge = function(value) {
+  if (value._deleted)
+    return null;
+  if ("remove_ids" in value) {
+    // No need to actually remove them from the 'ids' array: that should have been done already...
+    delete value.remove_ids;
+  }
 
+  return value;
+};

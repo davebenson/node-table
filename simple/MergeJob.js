@@ -13,6 +13,7 @@ function MergeJob() {
   this.older = new MergeInput();
   this.compare = null;
   this.merge = null;
+  this.final_merge = null;
 
   this.output_file = new File();
   this.output_offset = 0;
@@ -158,31 +159,63 @@ MergeJob.prototype._try_making_merge_output = function()
 
     //console.log("generated " + outputs.length + " outputs from " + oi + " and " + ni + "input entries");
       
-    if (outputs.length > 0) {
-      var output_buffers = [];
-      for (var i = 0; i < outputs.length; i++) {
-        var b = new Buffer(JSON.stringify(outputs[i]));
-        if (this.output_file.largest_entry < b.length)
-          this.output_file.largest_entry = b.length;
-        output_buffers.push(b);
-        output_buffers.push(newline_buffer);
-      }
-      var total_output = Buffer.concat(output_buffers);
-      common.write_sync_n(this.output_file.fd, total_output, this.output_offset);
-      this.last_output = outputs[outputs.length - 1];
-      this.output_offset += total_output.length;
-      this.output_file.size_bytes += total_output.length;
-      this.output_file.size_entries += outputs.length;
+    if (outputs.length === 0)
+      return;
 
-      if (!this.newer.eof && this.newer.peekable.length === 0) {
-        this._maybe_start_merge_input_read(this.newer);
+    // Update 'outputs' if we have a final_merge function.
+    if (this.output_file.start_input_entry === 0 && this.final_merge) {
+      var final_merge = this.final_merge;
+      for (var i = 0; i < outputs.length; i++) {
+        var o = final_merge(outputs[i]);
+        if (!o) {
+          // Finally found a deleted element.  Create the new array and copy already output values into it.
+          var new_outputs = [];
+          for (var j = 0; j < i; j++)
+            new_outputs.push(outputs[j]);
+          for (i++; i < outputs.length; i++) {
+            o = final_merge(outputs[i]);
+            if (o)
+              outputs.push(o);
+          }
+          outputs = new_outputs;
+          if (outputs.length === 0)
+            return;
+          break;
+        } else {
+          outputs[i] = o;
+        }
       }
-      if (!this.older.eof && this.older.peekable.length === 0) {
-        this._maybe_start_merge_input_read(this.older);
+    }
+      
+    var output_buffers = [];
+    for (var i = 0; i < outputs.length; i++) {
+      var o = outputs[i];
+      if (final_merge) {
+        o = final_merge(o);
+        if (!o)
+          continue;
       }
-      if (this.newer.eof && this.older.eof) {
-        this._finish_merge_job();
-      }
+      var b = new Buffer(JSON.stringify(o));
+      if (this.output_file.largest_entry < b.length)
+        this.output_file.largest_entry = b.length;
+      output_buffers.push(b);
+      output_buffers.push(newline_buffer);
+    }
+    var total_output = Buffer.concat(output_buffers);
+    common.write_sync_n(this.output_file.fd, total_output, this.output_offset);
+    this.last_output = outputs[outputs.length - 1];
+    this.output_offset += total_output.length;
+    this.output_file.size_bytes += total_output.length;
+    this.output_file.size_entries += outputs.length;
+
+    if (!this.newer.eof && this.newer.peekable.length === 0) {
+      this._maybe_start_merge_input_read(this.newer);
+    }
+    if (!this.older.eof && this.older.peekable.length === 0) {
+      this._maybe_start_merge_input_read(this.older);
+    }
+    if (this.newer.eof && this.older.eof) {
+      this._finish_merge_job();
     }
   }
 };

@@ -41,6 +41,7 @@ Table = function(options) {
   this.journal_fd = -1;
   this.journal_offset = 0;
   this.make_curried_comparator = options.make_curried_comparator;
+  this.final_merge = options.final_merge ? options.final_merge : null;
 
   try {
     this.dir_fd = fs.openSync(this.dir, "r");
@@ -373,6 +374,7 @@ Table.prototype._create_merge_job = function(older_file, options) {
   var merge_job = new MergeJob();
   merge_job.compare = this.compare;
   merge_job.merge = this.merge;
+  merge_job.final_merge = this.final_merge;
   merge_job.older.input_file = older_file;
   merge_job.newer.input_file = older_file.newer;
   older_file.merge_job = merge_job;
