@@ -1,5 +1,6 @@
 var assert = require("assert");
 
+// Represents an object in the cache
 function TrapCache_Object(id)
 {
   this.id = id;
@@ -8,6 +9,7 @@ function TrapCache_Object(id)
   this.last_trap = null;
 }
 
+// Represents a node in the list of traps for the object.
 function TrapCache_Trap()
 {
   this.next_in_object = null;
@@ -16,6 +18,8 @@ function TrapCache_Trap()
   this.state = 0;
 }
 
+// Represents an object that should be notified if any
+// of a set of objects changes.
 function TrapCache_Target(target_id)
 {
   this.target_id = target_id;
@@ -24,7 +28,8 @@ function TrapCache_Target(target_id)
 }
 
 exports.TrapCache = function() {
-  this.targets = {};
+  this.targets = {};            // map from target_id to TrapCache_Target
+  this.objects = {};            // map from id to TrapCache_Object
 };
 
 exports.TrapCache.prototype.trap = function(id, target_id)

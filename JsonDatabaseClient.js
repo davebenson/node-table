@@ -23,9 +23,10 @@ function normalize_payload(payload)
 
 function JsonDatabaseClient(options)
 {
+  // An array of Buffers.
   this.aob = [];
   this.incoming_size = 0;
-  this.first_buffer_offset = 0;
+  this.first_buffer_offset = 0;  // this many bytes of buffer[0] has been used
 
   this.state = 'CONNECTING';
   this.host = options.host;
@@ -36,6 +37,8 @@ function JsonDatabaseClient(options)
   this.pending_requests_by_request_id = {};
   this.next_request_id = 1;
 
+  // buffers to be written once the database connection has
+  // been established.
   this.pending_buffers = [];
 
   this._do_connect();
@@ -152,12 +155,14 @@ JsonDatabaseClient.prototype._do_connect = function()
         } else {
           var txt = "remote error: " + payload.toString();
           console.log(txt);
-          self.notify_error(txt);
-          request.callback(new Error(txt));
+          var err = new Error(txt);
+          self.emit("error-response", err);
+          request.callback(err);
         }
         break;
       case JsonDatabaseProtocol.CHANGED_MESSAGE: {
-        self.object_changed(JSON.parse(payload.toString()));
+        var changed_object = JSON.parse(payload.toString());
+        self.emit("changed", changed_object);
         break;
       }
       default:
@@ -166,7 +171,9 @@ JsonDatabaseClient.prototype._do_connect = function()
     }
   }
 };
-JsonDatabaseClient.prototype.send_message = function(response_type, request_id, payload) {
+
+JsonDatabaseClient.prototype.send_message =
+function(response_type, request_id, payload) {
   payload = normalize_payload(payload);
   var header = new Buffer(12);
   header.writeUInt32LE(response_type, 0);
@@ -189,9 +196,6 @@ JsonDatabaseClient.prototype._consolidate_incoming_buffers = function() {
   this.aob = [Buffer.concat(this.aob, this.incoming_size)];
 };
 
-JsonDatabaseClient.prototype.notify_error = function(err_msg)
-{
-};
 JsonDatabaseClient.prototype.object_changed = function(err_msg)
 {
 };

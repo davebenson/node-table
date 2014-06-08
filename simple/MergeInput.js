@@ -1,3 +1,9 @@
+// MergeInput: holds information about a single input to a MergeJob.
+//
+// This class is private to MergeJob.
+//
+// We retain an array of "peekable" values,
+// which also include their length (in bytes).
 
 function MergeInput() {
   this.input_offset = 0;
@@ -9,12 +15,15 @@ function MergeInput() {
   this.peekable = [];
   this.eof = false;
 }
-MergeInput.prototype.toJSON = function() {
+
+MergeInput.prototype.toJSON = function()
+{
   return {
     input_id: this.input_file.id,
     input_offset: this.input_offset
   }
 };
+
 MergeInput.prototype.remove_first = function(n)
 {
   var s = 0;

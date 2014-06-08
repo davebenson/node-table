@@ -1,3 +1,8 @@
 _ use largest_entry in do_search_entry
-_ npm test
+_ tests
+  _ SortMerge test
+  _ Table test
+  _ DatabaseClient test
+  _ DatabaseServer test
+_ leader election for transactions?
 

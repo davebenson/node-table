@@ -1,10 +1,31 @@
-
+//
+// SortMergeInMemory: a list-of-lists of values; each list has
+// twice as many input elements as the prior, or null.
+//
+// Example: suppose we add d,c,b,a to a SortMergeInMemory.
+//
+//    Action List-of-lists (lol member)
+//    ------ --------------------------
+//           []
+//    Add d
+//          [[d]]
+//    Add c  
+//          null,[c,d]]
+//    Add b  
+//          [b],[c,d]]
+//    Add a  
+//          [null,null,[a,b,c,d]]
+//
+// Merging occurs via the "merge" function.
+//
 
 function SortMergeInMemory(compare, merge) {
   this.lol = [];
   this.compare = compare;
   this.merge = merge;
 }
+
+// Add a value to the sort-merge machine.
 SortMergeInMemory.prototype.add = function(v) {
   var list = [v];
   for (var i = 0; i < this.lol.length; i++) {
@@ -18,6 +39,8 @@ SortMergeInMemory.prototype.add = function(v) {
   }
   this.lol.push(list);
 }
+
+// _merge_lists: Merge two sorted-lists of values together.
 SortMergeInMemory.prototype._merge_lists =
 function(older, newer) {
   var rv = [];
@@ -41,10 +64,17 @@ function(older, newer) {
   return rv;
 };
 
+// reset: reset the state without changing compare/merge functions.
 SortMergeInMemory.prototype.reset = function()
 {
   this.lol = [];
 };
+
+// get_list: return a complete list of all elements, sorted and merged.
+//
+// The most efficient way to use after exactly a power-of-two number
+// of elements.  (If you can't hit it exactly, it's better to stop
+// a few short of a power-of-two than to go past it.)
 SortMergeInMemory.prototype.get_list = function()
 {
   var rv = null;
@@ -58,6 +88,8 @@ SortMergeInMemory.prototype.get_list = function()
     }
   return rv ? rv : [];
 };
+
+// get: perform a value lookup.
 SortMergeInMemory.prototype.get = function(curried_comparator)
 {
   var rv = null;
@@ -74,6 +106,8 @@ SortMergeInMemory.prototype.get = function(curried_comparator)
   }
   return rv;
 };
+
+// _array_lookup: perform a looking in a single sorted array.
 SortMergeInMemory.prototype._array_lookup = function(curried_comparator, array)
 {
   var start = 0, n = array.length;
