@@ -1,0 +1,27 @@
+Various Pieces of the Puzzle
+----------------------------
+
+We need a way to do writes that extend beyond a single object modfication.
+Should we have an optimization for modifying single objects?
+How should adding and removing nodes work w/ Transactions.
+
+Algorithm Transaction:
+  1. allocate transaction_id
+  2. lock all objects known involved in transaction
+  3. attempt transaction:
+    3a. if successful
+      3a1. write back all objects along with transaction id
+      3a2. add to set of recently succeeded transactions
+    3b. if failed:
+      3b1. unlock all current objects
+      3b2. return failure
+    3c. if needs more objects:
+      3c1. unlock all current objects
+      3c2. add needed objects to set of objects involved in transaction
+      3c3. goto 2
+  
+Algorithm Add Node:
+  1. determine which buckets need replication
+  2. replicate buckets while listening to new events for those buckets
+
+Algorithm Delete Node:
